@@ -1,3 +1,86 @@
+//! Checksummed persistent blocks built on top of [`bstack`](https://docs.rs/bstack).
+//!
+//! # Overview
+//!
+//! `bblock` wraps any [`BStackAllocator`] and appends a 4-byte CRC32 checksum
+//! to every allocation. You verify integrity at any time with
+//! [`BBlock::verify`] or [`BBlockView::verify`]; if the stored checksum does
+//! not match the current data, the block has been corrupted since it was last
+//! written through the safe API.
+//!
+//! The main types:
+//!
+//! | Type                | Role                                                            |
+//! |---------------------|-----------------------------------------------------------------|
+//! | [`BBlockAllocator`] | Wraps a `BStackAllocator`; produces [`BBlock`]s                 |
+//! | [`BBlock`]          | Checksummed block handle; source of views, readers, and writers |
+//! | [`BBlockView`]      | Safe read/write window with `subview` support                   |
+//! | [`BBlockReader`]    | Cursor-based `io::Read + io::Seek` over a view's data           |
+//! | [`BBlockWriter`]    | Cursor-based `io::Write + io::Seek` that maintains the checksum |
+//!
+//! # What this crate protects you from
+//!
+//! **Undetected silent corruption** — bit rot, partial writes, and other
+//! storage anomalies that change bytes without signalling an error. `verify()`
+//! catches these as long as the checksum bytes themselves are intact.
+//!
+//! # What this crate does *not* protect you from
+//!
+//! * **`unsafe` code bypassing checksum tracking.** Writing through a raw
+//!   [`BStackSlice`] obtained via [`BBlock::into_slice`] leaves the checksum
+//!   stale. The safe API ([`BBlockView`], [`BBlockWriter`]) always recomputes it.
+//! * **A buggy or malicious allocator.** If the underlying [`BStackAllocator`]
+//!   writes to the wrong offsets or lengths, checksums cannot compensate.
+//! * **Direct use of `bstack`.** Writing to the same region through a
+//!   `bstack` handle updates the data but not the checksum.
+//!
+//! # Detection, not recovery
+//!
+//! `bblock` only **detects** corruption — it does not repair, revert, or
+//! reconstruct. `verify()` returning `false` means the data must not be trusted,
+//! but the crate provides no mechanism to restore a previous good value.
+//!
+//! The CRC32 checksum is also **not part of the allocator's crash-recovery
+//! strategy**. When a `bstack` file is reopened after a crash the allocator
+//! performs its own committed-length recovery; `bblock`'s checksum is
+//! orthogonal to that. If you want checksum-based corruption detection baked
+//! into allocation-level recovery, use an allocator that natively supports it.
+//!
+//! # Limitations and caveats
+//!
+//! * **If the checksum bytes are also corrupted**, `verify()` may return `true`
+//!   for corrupt data or `false` for intact data, with no way to distinguish the
+//!   two. CRC32 catches the vast majority of real-world corruption but is not a
+//!   cryptographic guarantee.
+//! * **Not a substitute for proper consistency strategies.** For applications
+//!   that require strong guarantees — write-ahead logs, copy-on-write pages,
+//!   two-phase commit — checksums are a useful building block but do not replace
+//!   those techniques. Reach for those tools rather than treating checksums as an
+//!   escape hatch from studying them.
+//! * **Avoid double-wrapping small blocks.** Storing a block reference (a
+//!   serialized [`BBlock`]) inside another `BBlock` is valid, but the 4-byte
+//!   checksum overhead is proportionally large for tiny payloads. Prefer
+//!   coarser-grained checksumming for small structures.
+//!
+//! # Quick start
+//!
+//! ```rust,no_run
+//! use bstack::{BStack, LinearBStackAllocator};
+//! use bblock::BBlockAllocator;
+//!
+//! let stack = BStack::open("data.bstk").unwrap();
+//! let alloc = BBlockAllocator::new(LinearBStackAllocator::new(stack));
+//!
+//! // Allocate a 16-byte block (20 bytes on disk: 16 data + 4 checksum).
+//! let block = alloc.alloc(16).unwrap();
+//! block.view().write(b"hello, bblock!!!").unwrap();
+//! assert!(block.verify().unwrap());
+//!
+//! // Subview writes update the full-block checksum automatically.
+//! block.view().subview(0, 5).write(b"world").unwrap();
+//! assert!(block.verify().unwrap());
+//! ```
+
 use bstack::{BStackAllocator, BStackSlice, BStackSliceReader, BStackSliceWriter};
 use std::cmp::Ordering;
 use std::fmt;
@@ -10,11 +93,23 @@ use std::io;
 /// immediately after the usable data in each block.
 pub const CHECKSUM_LENGTH: u64 = 4;
 
-/// Wraps any [`BStackAllocator`] and produces [`BBlock`]s whose allocations
-/// include a trailing 4-byte CRC32 checksum.
+/// Generic wrapper over any [`BStackAllocator`] that transparently appends a
+/// 4-byte CRC32 checksum to every allocation.
 ///
-/// `BBlockAllocator` does not import or depend on any concrete allocator
-/// implementation; it is generic over any `A: BStackAllocator`.
+/// `BBlockAllocator<A>` mirrors the allocation interface of the inner `A` but
+/// returns [`BBlock`]s instead of raw [`BStackSlice`]s. Each [`BBlock`] has
+/// `CHECKSUM_LENGTH` (4) extra bytes appended, so an `alloc(n)` call allocates
+/// `n + 4` bytes in the underlying stack.
+///
+/// The wrapper holds ownership of the inner allocator and exposes it via
+/// [`inner`](BBlockAllocator::inner) and
+/// [`into_inner`](BBlockAllocator::into_inner) for cases where direct access
+/// to the underlying stack is needed — for example to reconstruct a
+/// [`BBlock`] from a serialised reference via [`BBlock::from_bytes`].
+///
+/// No concrete allocator type is imported; the crate is intentionally
+/// allocator-agnostic and works with any type that satisfies
+/// `A: BStackAllocator`.
 pub struct BBlockAllocator<A: BStackAllocator> {
     inner: A,
 }
@@ -61,14 +156,32 @@ impl<A: BStackAllocator> BBlockAllocator<A> {
     }
 }
 
-/// A checksummed block of bytes allocated from a [`BBlockAllocator`].
+/// A handle to a checksummed block allocated by a [`BBlockAllocator`].
 ///
-/// The backing allocation is `len + 4` bytes: the first `len` bytes are usable
-/// data and the last 4 bytes store the CRC32 checksum in little-endian order.
+/// **Backing layout:** `[data: len bytes][crc32: 4 bytes LE]`
 ///
-/// Use [`BBlock::view`] to obtain a [`BBlockView`] for safe reads and writes
-/// that maintain checksum integrity. Use [`BBlock::into_slice`] only when raw
-/// access is required, accepting that checksum invariants are no longer upheld.
+/// The first `len` bytes are the usable payload. The last 4 bytes hold the
+/// CRC32 checksum of that payload in little-endian order.
+///
+/// `BBlock` is `Copy`: every copy refers to the same physical region in the
+/// underlying file, so mutations through one copy are immediately visible
+/// through any other copy (or a derived [`BBlockView`]).
+///
+/// ## Safe path
+///
+/// Use [`view`](BBlock::view) to get a [`BBlockView`], then call its read and
+/// write methods. Every write recomputes and stores the checksum. Call
+/// [`verify`](BBlock::verify) at any time to confirm integrity.
+///
+/// [`reader`](BBlock::reader) and [`writer`](BBlock::writer) provide
+/// cursor-based `io::Read`/`io::Write` access with the same checksum guarantees.
+///
+/// ## Unsafe escape hatch
+///
+/// [`into_slice`](BBlock::into_slice) consumes the block and returns the raw
+/// [`BStackSlice`] (including the checksum trailer). Any mutation through that
+/// slice bypasses checksum tracking; use it only when you specifically need
+/// to operate outside the checksum layer.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BBlock<'a, A: BStackAllocator> {
     slice: BStackSlice<'a, A>,
@@ -211,18 +324,30 @@ impl<'a, A: BStackAllocator> From<BBlock<'a, A>> for [u8; 16] {
     }
 }
 
-/// A safe view into a sub-range of a [`BBlock`]'s usable data.
+/// A safe read/write window into a sub-range of a [`BBlock`]'s usable data.
 ///
-/// Every mutation automatically recomputes the CRC32 checksum over the
-/// **full block data** (not just the view's sub-range), so integrity is always
-/// maintained from the block's perspective.
+/// A full-block view is obtained via [`BBlock::view`] or [`BBlockView::new`];
+/// a sub-range view via [`BBlockView::subview`]. Sub-range coordinates are
+/// always **relative** to the current view's start, mirroring the convention
+/// used by `BStackSlice::subslice`.
 ///
-/// A full-block view is obtained via [`BBlock::view`] or [`BBlockView::new`].
-/// Sub-range views are obtained via [`BBlockView::subview`].
+/// ## Checksum scope
 ///
-/// Read/write coordinates are relative to the view's own start (position 0 =
-/// first byte covered by this view), matching the behaviour of
-/// [`BStackSlice`]'s own sub-slice API.
+/// All write operations — including those through a sub-range view — recompute
+/// the CRC32 over the **full block data**, not just the bytes the view covers.
+/// Likewise, [`verify`](BBlockView::verify) always checks the full block,
+/// regardless of how narrow the view is.
+///
+/// This means a corrupted byte outside the view's range will still be caught
+/// by `verify()`, and a write inside the view will not leave the rest of the
+/// block's checksum stale.
+///
+/// ## What sub-views are for
+///
+/// Sub-views are a convenience for operating on a named field or section of a
+/// larger record without having to track absolute offsets. They do not create
+/// independent integrity domains: there is still one checksum per block, and
+/// all views share it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BBlockView<'a, A: BStackAllocator> {
     /// The full block allocation: `[data: full_len bytes][checksum: 4 bytes]`.
