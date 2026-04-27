@@ -1,4 +1,4 @@
-use bstack::{BStackAllocator, BStackSlice};
+use bstack::{BStackAllocator, BStackSlice, BStackSliceReader, BStackSliceWriter};
 use std::io;
 
 /// Number of bytes appended to every allocation for the CRC32 checksum.
@@ -66,7 +66,7 @@ impl<A: BStackAllocator> BBlockAllocator<A> {
 /// Use [`BBlock::view`] to obtain a [`BBlockView`] for safe reads and writes
 /// that maintain checksum integrity. Use [`BBlock::into_slice`] only when raw
 /// access is required, accepting that checksum invariants are no longer upheld.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BBlock<'a, A: BStackAllocator> {
     slice: BStackSlice<'a, A>,
     len: u64,
@@ -83,17 +83,38 @@ impl<'a, A: BStackAllocator> BBlock<'a, A> {
         self.len == 0
     }
 
+    /// Serialize this block reference as a 16-byte array.
+    ///
+    /// The format is `[offset: u64 LE | usable_len: u64 LE]`. Reconstruct
+    /// with [`BBlock::from_bytes`].
+    pub fn to_bytes(&self) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        out[..8].copy_from_slice(&self.slice.start().to_le_bytes());
+        out[8..].copy_from_slice(&self.len.to_le_bytes());
+        out
+    }
+
+    /// Reconstruct a block reference from a 16-byte array produced by [`BBlock::to_bytes`].
+    pub fn from_bytes(allocator: &'a A, bytes: [u8; 16]) -> Self {
+        let offset = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+        let len = u64::from_le_bytes(bytes[8..].try_into().unwrap());
+        BBlock {
+            slice: BStackSlice::new(allocator, offset, len + CHECKSUM_LENGTH),
+            len,
+        }
+    }
+
     /// Read the stored CRC32 checksum from the backing store.
     pub fn checksum(&self) -> io::Result<u32> {
         let mut buf = [0u8; 4];
-        self.checksum_slice().read_into(&mut buf)?;
+        unsafe { self.checksum_slice() }.read_into(&mut buf)?;
         Ok(u32::from_le_bytes(buf))
     }
 
     /// Return `true` if the stored checksum matches a freshly computed CRC32
     /// of the current data bytes.
     pub fn verify(&self) -> io::Result<bool> {
-        let data = self.data_slice().read()?;
+        let data = unsafe { self.data_slice() }.read()?;
         let stored = self.checksum()?;
         Ok(crc32fast::hash(&data) == stored)
     }
@@ -109,6 +130,36 @@ impl<'a, A: BStackAllocator> BBlock<'a, A> {
         }
     }
 
+    /// Return a cursor-based reader positioned at the start of the usable data.
+    pub fn reader(&self) -> BStackSliceReader<'a, A> {
+        unsafe { self.data_slice() }.reader()
+    }
+
+    /// Return a cursor-based reader positioned at `offset` within the usable data.
+    pub fn reader_at(&self, offset: u64) -> BStackSliceReader<'a, A> {
+        unsafe { self.data_slice() }.reader_at(offset)
+    }
+
+    /// Return a cursor-based writer positioned at the start of the usable data.
+    ///
+    /// # Safety
+    ///
+    /// Writes through this writer bypass checksum tracking. The caller is
+    /// responsible for maintaining or ignoring checksum integrity.
+    pub unsafe fn writer(&self) -> BStackSliceWriter<'a, A> {
+        unsafe { self.data_slice() }.writer()
+    }
+
+    /// Return a cursor-based writer positioned at `offset` within the usable data.
+    ///
+    /// # Safety
+    ///
+    /// Writes through this writer bypass checksum tracking. The caller is
+    /// responsible for maintaining or ignoring checksum integrity.
+    pub unsafe fn writer_at(&self, offset: u64) -> BStackSliceWriter<'a, A> {
+        unsafe { self.data_slice() }.writer_at(offset)
+    }
+
     /// Consume the block and return the raw underlying [`BStackSlice`].
     ///
     /// # Safety
@@ -120,12 +171,28 @@ impl<'a, A: BStackAllocator> BBlock<'a, A> {
         self.slice
     }
 
-    fn data_slice(&self) -> BStackSlice<'a, A> {
+    /// # Safety
+    ///
+    /// The returned slice covers only the usable data region. Any write to it
+    /// bypasses checksum tracking; callers must maintain checksum integrity
+    /// manually or accept that the checksum will be stale.
+    unsafe fn data_slice(&self) -> BStackSlice<'a, A> {
         self.slice.subslice(0, self.len)
     }
 
-    fn checksum_slice(&self) -> BStackSlice<'a, A> {
+    /// # Safety
+    ///
+    /// The returned slice covers the raw checksum bytes. Writing to it allows
+    /// forging an arbitrary checksum; callers must ensure the written value
+    /// correctly reflects the data region.
+    unsafe fn checksum_slice(&self) -> BStackSlice<'a, A> {
         self.slice.subslice(self.len, self.len + CHECKSUM_LENGTH)
+    }
+}
+
+impl<'a, A: BStackAllocator> From<BBlock<'a, A>> for [u8; 16] {
+    fn from(block: BBlock<'a, A>) -> [u8; 16] {
+        block.to_bytes()
     }
 }
 
@@ -134,7 +201,7 @@ impl<'a, A: BStackAllocator> BBlock<'a, A> {
 /// All write methods automatically recompute and persist the CRC32 checksum
 /// after each mutation, ensuring the stored checksum always reflects the
 /// current data. This is the primary interface for mutating block contents.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BBlockView<'a, A: BStackAllocator> {
     slice: BStackSlice<'a, A>,
     len: u64,
@@ -161,23 +228,23 @@ impl<'a, A: BStackAllocator> BBlockView<'a, A> {
 
     /// Read all usable bytes into a new `Vec`.
     pub fn read(&self) -> io::Result<Vec<u8>> {
-        self.data_slice().read()
+        unsafe { self.data_slice() }.read()
     }
 
     /// Read all usable bytes into `buf`.
     pub fn read_into(&self, buf: &mut [u8]) -> io::Result<()> {
-        self.data_slice().read_into(buf)
+        unsafe { self.data_slice() }.read_into(buf)
     }
 
     /// Read bytes starting at `start` into `buf`.
     pub fn read_range_into(&self, start: u64, buf: &mut [u8]) -> io::Result<()> {
-        self.data_slice().read_range_into(start, buf)
+        unsafe { self.data_slice() }.read_range_into(start, buf)
     }
 
     /// Read the stored CRC32 checksum.
     pub fn checksum(&self) -> io::Result<u32> {
         let mut buf = [0u8; 4];
-        self.checksum_slice().read_into(&mut buf)?;
+        unsafe { self.checksum_slice() }.read_into(&mut buf)?;
         Ok(u32::from_le_bytes(buf))
     }
 
@@ -190,40 +257,84 @@ impl<'a, A: BStackAllocator> BBlockView<'a, A> {
 
     /// Overwrite the beginning of the block with `data` and recompute the checksum.
     pub fn write(&self, data: &[u8]) -> io::Result<()> {
-        self.data_slice().write(data)?;
+        unsafe { self.data_slice() }.write(data)?;
         self.update_checksum()
     }
 
     /// Overwrite bytes starting at `start` with `data` and recompute the checksum.
     pub fn write_range(&self, start: u64, data: &[u8]) -> io::Result<()> {
-        self.data_slice().write_range(start, data)?;
+        unsafe { self.data_slice() }.write_range(start, data)?;
         self.update_checksum()
     }
 
     /// Zero all usable bytes and recompute the checksum.
     pub fn zero(&self) -> io::Result<()> {
-        self.data_slice().zero()?;
+        unsafe { self.data_slice() }.zero()?;
         self.update_checksum()
     }
 
     /// Zero `n` usable bytes starting at `start` and recompute the checksum.
     pub fn zero_range(&self, start: u64, n: u64) -> io::Result<()> {
-        self.data_slice().zero_range(start, n)?;
+        unsafe { self.data_slice() }.zero_range(start, n)?;
         self.update_checksum()
     }
 
-    fn data_slice(&self) -> BStackSlice<'a, A> {
+    /// Return a cursor-based reader positioned at the start of the usable data.
+    pub fn reader(&self) -> BStackSliceReader<'a, A> {
+        unsafe { self.data_slice() }.reader()
+    }
+
+    /// Return a cursor-based reader positioned at `offset` within the usable data.
+    pub fn reader_at(&self, offset: u64) -> BStackSliceReader<'a, A> {
+        unsafe { self.data_slice() }.reader_at(offset)
+    }
+
+    /// Return a cursor-based writer positioned at the start of the usable data.
+    ///
+    /// # Safety
+    ///
+    /// Writes through this writer bypass checksum tracking. Use the safe write
+    /// methods ([`write`](Self::write), [`write_range`](Self::write_range),
+    /// [`zero`](Self::zero), [`zero_range`](Self::zero_range)) to maintain
+    /// checksum integrity automatically.
+    pub unsafe fn writer(&self) -> BStackSliceWriter<'a, A> {
+        unsafe { self.data_slice() }.writer()
+    }
+
+    /// Return a cursor-based writer positioned at `offset` within the usable data.
+    ///
+    /// # Safety
+    ///
+    /// Writes through this writer bypass checksum tracking. Use the safe write
+    /// methods ([`write`](Self::write), [`write_range`](Self::write_range),
+    /// [`zero`](Self::zero), [`zero_range`](Self::zero_range)) to maintain
+    /// checksum integrity automatically.
+    pub unsafe fn writer_at(&self, offset: u64) -> BStackSliceWriter<'a, A> {
+        unsafe { self.data_slice() }.writer_at(offset)
+    }
+
+    /// # Safety
+    ///
+    /// The returned slice covers only the usable data region. Any write to it
+    /// bypasses checksum tracking; callers must maintain checksum integrity
+    /// manually or accept that the checksum will be stale.
+    unsafe fn data_slice(&self) -> BStackSlice<'a, A> {
         self.slice.subslice(0, self.len)
     }
 
-    fn checksum_slice(&self) -> BStackSlice<'a, A> {
+    /// # Safety
+    ///
+    /// The returned slice covers the raw checksum bytes. Writing to it allows
+    /// forging an arbitrary checksum; callers must ensure the written value
+    /// correctly reflects the data region.
+    unsafe fn checksum_slice(&self) -> BStackSlice<'a, A> {
         self.slice.subslice(self.len, self.len + CHECKSUM_LENGTH)
     }
 
     fn update_checksum(&self) -> io::Result<()> {
         let data = self.read()?;
         let checksum = crc32fast::hash(&data);
-        self.checksum_slice().write(&checksum.to_le_bytes())
+        unsafe { self.checksum_slice() }.write(&checksum.to_le_bytes())
     }
 }
 
@@ -291,5 +402,38 @@ mod tests {
         view.zero().unwrap();
         assert_eq!(view.read().unwrap(), vec![0u8; 6]);
         assert!(view.verify().unwrap());
+    }
+
+    #[test]
+    fn test_to_from_bytes() {
+        let (alloc, _f) = make_allocator();
+        let block = alloc.alloc(8).unwrap();
+        block.view().write(&b"rustacean"[..8]).unwrap();
+        let bytes: [u8; 16] = block.into();
+        let block2 = BBlock::from_bytes(alloc.inner(), bytes);
+        assert_eq!(block2.len(), 8);
+        assert!(block2.verify().unwrap());
+        assert_eq!(block2.view().read().unwrap(), &b"rustacean"[..8]);
+    }
+
+    #[test]
+    fn test_reader() {
+        use std::io::Read;
+        let (alloc, _f) = make_allocator();
+        let block = alloc.alloc(4).unwrap();
+        block.view().write(b"abcd").unwrap();
+        let mut buf = [0u8; 4];
+        block.reader().read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"abcd");
+    }
+
+    #[test]
+    fn test_unsafe_writer_invalidates_checksum() {
+        use std::io::Write;
+        let (alloc, _f) = make_allocator();
+        let block = alloc.alloc(4).unwrap();
+        block.view().write(b"abcd").unwrap();
+        unsafe { block.writer().write_all(b"WXYZ").unwrap() };
+        assert!(!block.view().verify().unwrap());
     }
 }
