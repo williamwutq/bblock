@@ -1,0 +1,17 @@
+[package]
+name = "bblock"
+version = "0.1.0"
+edition = "2024"
+authors = ["William Wu <williamwutq@gmail.com>", "Claude <claude@anthropic.com>"]
+license = "MIT"
+description = "Persistent checksumed blocks built on top of bstack"
+readme = "README.md"
+changelog = "CHANGELOG.md"
+repository = "https://github.com/williamwutq/bblock"
+documentation = "https://docs.rs/bblock"
+keywords = ["checksum", "persistent", "file-backed", "database", "binary"]
+
+[dependencies]
+bstack = { version = ">=0.1.6", features = ["alloc"] }
+crc32fast = "1.5"
+
