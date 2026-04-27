@@ -12,6 +12,9 @@ documentation = "https://docs.rs/bblock"
 keywords = ["checksum", "persistent", "file-backed", "database", "binary"]
 
 [dependencies]
-bstack = { version = ">=0.1.6", features = ["alloc"] }
+bstack = { version = ">=0.1.6", features = ["alloc", "set"] }
 crc32fast = "1.5"
+
+[dev-dependencies]
+tempfile = "3"
 
