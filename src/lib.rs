@@ -1,4 +1,7 @@
 use bstack::{BStackAllocator, BStackSlice, BStackSliceReader, BStackSliceWriter};
+use std::cmp::Ordering;
+use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::io;
 
 /// Number of bytes appended to every allocation for the CRC32 checksum.
@@ -119,45 +122,57 @@ impl<'a, A: BStackAllocator> BBlock<'a, A> {
         Ok(crc32fast::hash(&data) == stored)
     }
 
-    /// Return a [`BBlockView`] for safe reads and checksum-aware writes.
+    /// Return a [`BBlockView`] covering the full usable data region.
     ///
     /// The view shares the same backing region as this block; both remain
     /// independently usable because [`BStackSlice`] is `Copy`.
     pub fn view(&self) -> BBlockView<'a, A> {
         BBlockView {
             slice: self.slice,
-            len: self.len,
+            full_len: self.len,
+            start: 0,
+            end: self.len,
         }
     }
 
     /// Return a cursor-based reader positioned at the start of the usable data.
-    pub fn reader(&self) -> BStackSliceReader<'a, A> {
-        unsafe { self.data_slice() }.reader()
+    pub fn reader(&self) -> BBlockReader<'a, A> {
+        BBlockReader {
+            inner: unsafe { self.data_slice() }.reader(),
+        }
     }
 
     /// Return a cursor-based reader positioned at `offset` within the usable data.
-    pub fn reader_at(&self, offset: u64) -> BStackSliceReader<'a, A> {
-        unsafe { self.data_slice() }.reader_at(offset)
+    pub fn reader_at(&self, offset: u64) -> BBlockReader<'a, A> {
+        BBlockReader {
+            inner: unsafe { self.data_slice() }.reader_at(offset),
+        }
     }
 
     /// Return a cursor-based writer positioned at the start of the usable data.
     ///
-    /// # Safety
-    ///
-    /// Writes through this writer bypass checksum tracking. The caller is
-    /// responsible for maintaining or ignoring checksum integrity.
-    pub unsafe fn writer(&self) -> BStackSliceWriter<'a, A> {
-        unsafe { self.data_slice() }.writer()
+    /// Every write through the returned [`BBlockWriter`] automatically
+    /// recomputes and persists the CRC32 checksum over the full data region.
+    pub fn writer(&self) -> BBlockWriter<'a, A> {
+        let full_data = unsafe { self.data_slice() };
+        BBlockWriter {
+            inner: full_data.writer(),
+            full_data,
+            checksum: unsafe { self.checksum_slice() },
+        }
     }
 
     /// Return a cursor-based writer positioned at `offset` within the usable data.
     ///
-    /// # Safety
-    ///
-    /// Writes through this writer bypass checksum tracking. The caller is
-    /// responsible for maintaining or ignoring checksum integrity.
-    pub unsafe fn writer_at(&self, offset: u64) -> BStackSliceWriter<'a, A> {
-        unsafe { self.data_slice() }.writer_at(offset)
+    /// Every write through the returned [`BBlockWriter`] automatically
+    /// recomputes and persists the CRC32 checksum over the full data region.
+    pub fn writer_at(&self, offset: u64) -> BBlockWriter<'a, A> {
+        let full_data = unsafe { self.data_slice() };
+        BBlockWriter {
+            inner: full_data.writer_at(offset),
+            full_data,
+            checksum: unsafe { self.checksum_slice() },
+        }
     }
 
     /// Consume the block and return the raw underlying [`BStackSlice`].
@@ -196,145 +211,357 @@ impl<'a, A: BStackAllocator> From<BBlock<'a, A>> for [u8; 16] {
     }
 }
 
-/// A safe view into a [`BBlock`] with read and checksum-aware write operations.
+/// A safe view into a sub-range of a [`BBlock`]'s usable data.
 ///
-/// All write methods automatically recompute and persist the CRC32 checksum
-/// after each mutation, ensuring the stored checksum always reflects the
-/// current data. This is the primary interface for mutating block contents.
+/// Every mutation automatically recomputes the CRC32 checksum over the
+/// **full block data** (not just the view's sub-range), so integrity is always
+/// maintained from the block's perspective.
+///
+/// A full-block view is obtained via [`BBlock::view`] or [`BBlockView::new`].
+/// Sub-range views are obtained via [`BBlockView::subview`].
+///
+/// Read/write coordinates are relative to the view's own start (position 0 =
+/// first byte covered by this view), matching the behaviour of
+/// [`BStackSlice`]'s own sub-slice API.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BBlockView<'a, A: BStackAllocator> {
+    /// The full block allocation: `[data: full_len bytes][checksum: 4 bytes]`.
     slice: BStackSlice<'a, A>,
-    len: u64,
+    /// Length of the full usable data region (used for checksum recomputation).
+    full_len: u64,
+    /// Inclusive start of this view within the data region.
+    start: u64,
+    /// Exclusive end of this view within the data region.
+    end: u64,
 }
 
 impl<'a, A: BStackAllocator> BBlockView<'a, A> {
-    /// Create a view from an existing [`BBlock`].
+    /// Create a full-block view from an existing [`BBlock`].
     pub fn new(block: &BBlock<'a, A>) -> Self {
         Self {
             slice: block.slice,
-            len: block.len,
+            full_len: block.len,
+            start: 0,
+            end: block.len,
         }
     }
 
-    /// Number of usable (non-checksum) bytes.
+    /// Number of bytes covered by this view.
     pub fn len(&self) -> u64 {
-        self.len
+        self.end - self.start
     }
 
-    /// Returns `true` if this view covers zero usable bytes.
+    /// Returns `true` if this view covers zero bytes.
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.start == self.end
     }
 
-    /// Read all usable bytes into a new `Vec`.
+    /// Return a view covering `[start, end)` within this view's coordinate space.
+    ///
+    /// Coordinates are relative: `subview(0, 3)` on a view that itself starts at
+    /// byte 5 of the block produces a view covering bytes 5–7 of the block.
+    ///
+    /// Writes through the returned view update the **full block checksum**.
+    pub fn subview(&self, start: u64, end: u64) -> Self {
+        BBlockView {
+            slice: self.slice,
+            full_len: self.full_len,
+            start: self.start + start,
+            end: self.start + end,
+        }
+    }
+
+    /// Read all bytes in this view into a new `Vec`.
     pub fn read(&self) -> io::Result<Vec<u8>> {
         unsafe { self.data_slice() }.read()
     }
 
-    /// Read all usable bytes into `buf`.
+    /// Read all bytes in this view into `buf`.
     pub fn read_into(&self, buf: &mut [u8]) -> io::Result<()> {
         unsafe { self.data_slice() }.read_into(buf)
     }
 
-    /// Read bytes starting at `start` into `buf`.
+    /// Read bytes starting at `start` within this view into `buf`.
     pub fn read_range_into(&self, start: u64, buf: &mut [u8]) -> io::Result<()> {
         unsafe { self.data_slice() }.read_range_into(start, buf)
     }
 
-    /// Read the stored CRC32 checksum.
+    /// Read the stored CRC32 checksum of the containing block.
     pub fn checksum(&self) -> io::Result<u32> {
         let mut buf = [0u8; 4];
         unsafe { self.checksum_slice() }.read_into(&mut buf)?;
         Ok(u32::from_le_bytes(buf))
     }
 
-    /// Return `true` if the stored checksum matches the current data.
+    /// Return `true` if the containing block's stored checksum matches its
+    /// current full data.
+    ///
+    /// This always verifies the **full block**, regardless of whether this is
+    /// a subview.
     pub fn verify(&self) -> io::Result<bool> {
-        let data = self.read()?;
+        let data = unsafe { self.full_data_slice() }.read()?;
         let stored = self.checksum()?;
         Ok(crc32fast::hash(&data) == stored)
     }
 
-    /// Overwrite the beginning of the block with `data` and recompute the checksum.
+    /// Overwrite the beginning of this view with `data` and recompute the
+    /// block checksum.
     pub fn write(&self, data: &[u8]) -> io::Result<()> {
         unsafe { self.data_slice() }.write(data)?;
         self.update_checksum()
     }
 
-    /// Overwrite bytes starting at `start` with `data` and recompute the checksum.
+    /// Overwrite bytes starting at `start` within this view with `data` and
+    /// recompute the block checksum.
     pub fn write_range(&self, start: u64, data: &[u8]) -> io::Result<()> {
         unsafe { self.data_slice() }.write_range(start, data)?;
         self.update_checksum()
     }
 
-    /// Zero all usable bytes and recompute the checksum.
+    /// Zero all bytes in this view and recompute the block checksum.
     pub fn zero(&self) -> io::Result<()> {
         unsafe { self.data_slice() }.zero()?;
         self.update_checksum()
     }
 
-    /// Zero `n` usable bytes starting at `start` and recompute the checksum.
+    /// Zero `n` bytes starting at `start` within this view and recompute the
+    /// block checksum.
     pub fn zero_range(&self, start: u64, n: u64) -> io::Result<()> {
         unsafe { self.data_slice() }.zero_range(start, n)?;
         self.update_checksum()
     }
 
-    /// Return a cursor-based reader positioned at the start of the usable data.
-    pub fn reader(&self) -> BStackSliceReader<'a, A> {
-        unsafe { self.data_slice() }.reader()
+    /// Return a cursor-based reader positioned at the start of this view.
+    pub fn reader(&self) -> BBlockReader<'a, A> {
+        BBlockReader {
+            inner: unsafe { self.data_slice() }.reader(),
+        }
     }
 
-    /// Return a cursor-based reader positioned at `offset` within the usable data.
-    pub fn reader_at(&self, offset: u64) -> BStackSliceReader<'a, A> {
-        unsafe { self.data_slice() }.reader_at(offset)
+    /// Return a cursor-based reader positioned at `offset` within this view.
+    pub fn reader_at(&self, offset: u64) -> BBlockReader<'a, A> {
+        BBlockReader {
+            inner: unsafe { self.data_slice() }.reader_at(offset),
+        }
     }
 
-    /// Return a cursor-based writer positioned at the start of the usable data.
+    /// Return a cursor-based writer positioned at the start of this view.
     ///
+    /// Every write automatically recomputes the full block checksum.
+    pub fn writer(&self) -> BBlockWriter<'a, A> {
+        BBlockWriter {
+            inner: unsafe { self.data_slice() }.writer(),
+            full_data: unsafe { self.full_data_slice() },
+            checksum: unsafe { self.checksum_slice() },
+        }
+    }
+
+    /// Return a cursor-based writer positioned at `offset` within this view.
+    ///
+    /// Every write automatically recomputes the full block checksum.
+    pub fn writer_at(&self, offset: u64) -> BBlockWriter<'a, A> {
+        BBlockWriter {
+            inner: unsafe { self.data_slice() }.writer_at(offset),
+            full_data: unsafe { self.full_data_slice() },
+            checksum: unsafe { self.checksum_slice() },
+        }
+    }
+
     /// # Safety
     ///
-    /// Writes through this writer bypass checksum tracking. Use the safe write
-    /// methods ([`write`](Self::write), [`write_range`](Self::write_range),
-    /// [`zero`](Self::zero), [`zero_range`](Self::zero_range)) to maintain
-    /// checksum integrity automatically.
-    pub unsafe fn writer(&self) -> BStackSliceWriter<'a, A> {
-        unsafe { self.data_slice() }.writer()
-    }
-
-    /// Return a cursor-based writer positioned at `offset` within the usable data.
-    ///
-    /// # Safety
-    ///
-    /// Writes through this writer bypass checksum tracking. Use the safe write
-    /// methods ([`write`](Self::write), [`write_range`](Self::write_range),
-    /// [`zero`](Self::zero), [`zero_range`](Self::zero_range)) to maintain
-    /// checksum integrity automatically.
-    pub unsafe fn writer_at(&self, offset: u64) -> BStackSliceWriter<'a, A> {
-        unsafe { self.data_slice() }.writer_at(offset)
-    }
-
-    /// # Safety
-    ///
-    /// The returned slice covers only the usable data region. Any write to it
-    /// bypasses checksum tracking; callers must maintain checksum integrity
-    /// manually or accept that the checksum will be stale.
+    /// Returns only the bytes covered by this view. Any write bypasses checksum
+    /// tracking; callers must call `update_checksum` or accept stale checksums.
     unsafe fn data_slice(&self) -> BStackSlice<'a, A> {
-        self.slice.subslice(0, self.len)
+        self.slice.subslice(self.start, self.end)
     }
 
     /// # Safety
     ///
-    /// The returned slice covers the raw checksum bytes. Writing to it allows
-    /// forging an arbitrary checksum; callers must ensure the written value
-    /// correctly reflects the data region.
+    /// Returns the full block data region. Intended for checksum recomputation.
+    unsafe fn full_data_slice(&self) -> BStackSlice<'a, A> {
+        self.slice.subslice(0, self.full_len)
+    }
+
+    /// # Safety
+    ///
+    /// Returns the raw checksum bytes. Writing an incorrect value forges the
+    /// checksum; callers must ensure it reflects the full data region.
     unsafe fn checksum_slice(&self) -> BStackSlice<'a, A> {
-        self.slice.subslice(self.len, self.len + CHECKSUM_LENGTH)
+        self.slice
+            .subslice(self.full_len, self.full_len + CHECKSUM_LENGTH)
     }
 
     fn update_checksum(&self) -> io::Result<()> {
-        let data = self.read()?;
-        let checksum = crc32fast::hash(&data);
-        unsafe { self.checksum_slice() }.write(&checksum.to_le_bytes())
+        let data = unsafe { self.full_data_slice() }.read()?;
+        let crc = crc32fast::hash(&data);
+        unsafe { self.checksum_slice() }.write(&crc.to_le_bytes())
+    }
+}
+
+/// A cursor-based reader over the bytes covered by a [`BBlockView`].
+///
+/// Implements [`io::Read`] and [`io::Seek`] within the coordinate space of the
+/// view (position 0 = first byte of the view). Constructed via
+/// [`BBlock::reader`], [`BBlock::reader_at`], [`BBlockView::reader`], or
+/// [`BBlockView::reader_at`].
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BBlockReader<'a, A: BStackAllocator> {
+    inner: BStackSliceReader<'a, A>,
+}
+
+impl<'a, A: BStackAllocator> fmt::Debug for BBlockReader<'a, A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BBlockReader")
+            .field("start", &self.inner.slice().start())
+            .field("end", &self.inner.slice().end())
+            .field("len", &self.inner.slice().len())
+            .field("cursor", &self.inner.position())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, A: BStackAllocator> BBlockReader<'a, A> {
+    /// Return the current cursor position within the view's coordinate space.
+    pub fn position(&self) -> u64 {
+        self.inner.position()
+    }
+}
+
+/// Two readers compare equal when their active slice and cursor position match.
+impl<'a, A: BStackAllocator> PartialEq<BBlockWriter<'a, A>> for BBlockReader<'a, A> {
+    fn eq(&self, other: &BBlockWriter<'a, A>) -> bool {
+        self.inner.slice() == other.inner.slice() && self.inner.position() == other.inner.position()
+    }
+}
+
+/// Ordered by absolute payload position, then by active length.
+impl<'a, A: BStackAllocator> PartialOrd<BBlockWriter<'a, A>> for BBlockReader<'a, A> {
+    fn partial_cmp(&self, other: &BBlockWriter<'a, A>) -> Option<Ordering> {
+        let self_pos = self.inner.slice().start() + self.inner.position();
+        let other_pos = other.inner.slice().start() + other.inner.position();
+        Some(
+            self_pos
+                .cmp(&other_pos)
+                .then(self.inner.slice().len().cmp(&other.inner.slice().len())),
+        )
+    }
+}
+
+impl<'a, A: BStackAllocator> io::Read for BBlockReader<'a, A> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl<'a, A: BStackAllocator> io::Seek for BBlockReader<'a, A> {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+/// A cursor-based writer over the bytes covered by a [`BBlockView`].
+///
+/// Implements [`io::Write`] and [`io::Seek`] within the coordinate space of the
+/// view. Every write automatically recomputes the CRC32 checksum over the
+/// **full block data** (not just the active view range), keeping the block's
+/// integrity invariant intact. Constructed via [`BBlock::writer`],
+/// [`BBlock::writer_at`], [`BBlockView::writer`], or [`BBlockView::writer_at`].
+#[derive(Clone)]
+pub struct BBlockWriter<'a, A: BStackAllocator> {
+    /// Cursor writer scoped to the view's active range.
+    inner: BStackSliceWriter<'a, A>,
+    /// Full block data region — read to recompute the checksum after each write.
+    full_data: BStackSlice<'a, A>,
+    /// Checksum slot — written after each mutation.
+    checksum: BStackSlice<'a, A>,
+}
+
+impl<'a, A: BStackAllocator> fmt::Debug for BBlockWriter<'a, A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BBlockWriter")
+            .field("start", &self.inner.slice().start())
+            .field("end", &self.inner.slice().end())
+            .field("len", &self.inner.slice().len())
+            .field("cursor", &self.inner.position())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, A: BStackAllocator> BBlockWriter<'a, A> {
+    /// Return the current cursor position within the view's coordinate space.
+    pub fn position(&self) -> u64 {
+        self.inner.position()
+    }
+
+    fn update_checksum(&self) -> io::Result<()> {
+        let data = self.full_data.read()?;
+        let crc = crc32fast::hash(&data);
+        self.checksum.write(&crc.to_le_bytes())
+    }
+}
+
+/// Two writers compare equal when their active slice and cursor position match.
+impl<'a, A: BStackAllocator> PartialEq for BBlockWriter<'a, A> {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.slice() == other.inner.slice() && self.inner.position() == other.inner.position()
+    }
+}
+
+impl<'a, A: BStackAllocator> Eq for BBlockWriter<'a, A> {}
+
+impl<'a, A: BStackAllocator> Hash for BBlockWriter<'a, A> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.inner.slice().hash(state);
+        self.inner.position().hash(state);
+    }
+}
+
+/// Ordered by absolute payload position, then by active length.
+impl<'a, A: BStackAllocator> PartialOrd for BBlockWriter<'a, A> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<'a, A: BStackAllocator> Ord for BBlockWriter<'a, A> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let self_pos = self.inner.slice().start() + self.inner.position();
+        let other_pos = other.inner.slice().start() + other.inner.position();
+        self_pos
+            .cmp(&other_pos)
+            .then(self.inner.slice().len().cmp(&other.inner.slice().len()))
+    }
+}
+
+impl<'a, A: BStackAllocator> PartialEq<BBlockReader<'a, A>> for BBlockWriter<'a, A> {
+    fn eq(&self, other: &BBlockReader<'a, A>) -> bool {
+        other == self
+    }
+}
+
+impl<'a, A: BStackAllocator> PartialOrd<BBlockReader<'a, A>> for BBlockWriter<'a, A> {
+    fn partial_cmp(&self, other: &BBlockReader<'a, A>) -> Option<Ordering> {
+        other.partial_cmp(self).map(|o| o.reverse())
+    }
+}
+
+impl<'a, A: BStackAllocator> io::Write for BBlockWriter<'a, A> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        if n > 0 {
+            self.update_checksum()?;
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl<'a, A: BStackAllocator> io::Seek for BBlockWriter<'a, A> {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        self.inner.seek(pos)
     }
 }
 
@@ -428,12 +655,86 @@ mod tests {
     }
 
     #[test]
-    fn test_unsafe_writer_invalidates_checksum() {
+    fn test_writer_maintains_checksum() {
         use std::io::Write;
         let (alloc, _f) = make_allocator();
         let block = alloc.alloc(4).unwrap();
-        block.view().write(b"abcd").unwrap();
-        unsafe { block.writer().write_all(b"WXYZ").unwrap() };
-        assert!(!block.view().verify().unwrap());
+        block.writer().write_all(b"WXYZ").unwrap();
+        assert!(block.verify().unwrap());
+        assert_eq!(block.view().read().unwrap(), b"WXYZ");
+    }
+
+    #[test]
+    fn test_writer_seek_and_overwrite() {
+        use std::io::{Seek, SeekFrom, Write};
+        let (alloc, _f) = make_allocator();
+        let block = alloc.alloc(4).unwrap();
+        let mut w = block.writer();
+        w.write_all(b"abcd").unwrap();
+        w.seek(SeekFrom::Start(2)).unwrap();
+        w.write_all(b"XY").unwrap();
+        assert!(block.verify().unwrap());
+        assert_eq!(block.view().read().unwrap(), b"abXY");
+    }
+
+    #[test]
+    fn test_reader_writer_cmp() {
+        let (alloc, _f) = make_allocator();
+        let block = alloc.alloc(4).unwrap();
+        let r = block.reader();
+        let w = block.writer();
+        assert_eq!(r, w);
+        assert_eq!(w, r);
+    }
+
+    #[test]
+    fn test_subview_read() {
+        let (alloc, _f) = make_allocator();
+        let block = alloc.alloc(8).unwrap();
+        block.view().write(b"hello!!!").unwrap();
+        let sub = block.view().subview(0, 5);
+        assert_eq!(sub.len(), 5);
+        assert_eq!(sub.read().unwrap(), b"hello");
+    }
+
+    #[test]
+    fn test_subview_write_updates_full_checksum() {
+        let (alloc, _f) = make_allocator();
+        let block = alloc.alloc(8).unwrap();
+        block.view().write(b"hello!!!").unwrap();
+        let sub = block.view().subview(0, 5);
+        sub.write(b"world").unwrap();
+        assert!(block.verify().unwrap());
+        assert_eq!(block.view().read().unwrap(), b"world!!!");
+    }
+
+    #[test]
+    fn test_subview_writer_updates_full_checksum() {
+        use std::io::Write;
+        let (alloc, _f) = make_allocator();
+        let block = alloc.alloc(8).unwrap();
+        block.view().write(b"hello!!!").unwrap();
+        block
+            .view()
+            .subview(0, 5)
+            .writer()
+            .write_all(b"world")
+            .unwrap();
+        assert!(block.verify().unwrap());
+        assert_eq!(block.view().read().unwrap(), b"world!!!");
+    }
+
+    #[test]
+    fn test_subview_nested() {
+        let (alloc, _f) = make_allocator();
+        let block = alloc.alloc(8).unwrap();
+        block.view().write(b"abcdefgh").unwrap();
+        // subview [2, 6) then subview [1, 3) of that → block bytes [3, 5)
+        let sub = block.view().subview(2, 6).subview(1, 3);
+        assert_eq!(sub.len(), 2);
+        assert_eq!(sub.read().unwrap(), b"de");
+        sub.write(b"XY").unwrap();
+        assert!(block.verify().unwrap());
+        assert_eq!(block.view().read().unwrap(), b"abcXYfgh");
     }
 }
