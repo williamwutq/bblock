@@ -14,6 +14,8 @@ persistent, checksummed blocks. Every allocation carries a 4-byte CRC32 trailer;
 
 - **Transparent checksumming** — allocate as usual; the 4-byte CRC32 trailer is
   managed automatically by the safe API.
+- **XOR checksum option** — use the `xor` module for faster incremental checksum
+  updates on writes, at the cost of weaker error detection compared to CRC32.
 - **Sub-range views** — `BBlockView::subview(start, end)` lets you operate on a
   named field of a record; writes still update the full-block checksum.
 - **Cursor-based I/O** — `BBlockReader` and `BBlockWriter` implement
@@ -61,6 +63,38 @@ assert!(block.verify().unwrap());
 
 ---
 
+## XOR checksum (faster writes)
+
+For better write performance with incremental checksum updates:
+
+```rust,no_run
+use bstack::{BStack, LinearBStackAllocator};
+use bblock::xor::BXorBlockAllocator;
+
+// Open (or create) a bstack file and wrap the allocator.
+let stack = BStack::open("data.bstk").unwrap();
+let alloc = BXorBlockAllocator::new(LinearBStackAllocator::new(stack));
+
+// Allocate a 16-byte block.  On disk it occupies 20 bytes (16 + 4 checksum).
+let block = alloc.alloc(16).unwrap();
+let view = block.view();
+
+view.write(b"hello, bblock!!!").unwrap();
+assert!(view.verify().unwrap()); // checksum is valid
+
+// Sub-range views update the full-block checksum automatically.
+view.subview(0, 5).write(b"world").unwrap();
+assert!(block.verify().unwrap()); // still valid; full block was re-checksummed
+
+// Cursor-based writer.
+use std::io::Write;
+let mut w = block.writer();
+w.write_all(b"cursor  write!!!").unwrap();
+assert!(block.verify().unwrap());
+```
+
+---
+
 ## API overview
 
 | Type                  | Description                                                   |
@@ -71,6 +105,17 @@ assert!(block.verify().unwrap());
 | `BBlockReader<'a, A>` | `io::Read + io::Seek` over the view's data range              |
 | `BBlockWriter<'a, A>` | `io::Write + io::Seek`; recomputes checksum after every write |
 | `CHECKSUM_LENGTH`     | `4` — the CRC32 trailer size in bytes                         |
+
+### XOR Module Types
+
+| Type                  | Description                                                   |
+|-----------------------|---------------------------------------------------------------|
+| `BXorBlockAllocator<A>` | Wraps `A: BStackAllocator`; `alloc`, `realloc`, `dealloc`     |
+| `BXorBlock<'a, A>`    | Checksummed block handle; `Copy`; source of views and cursors |
+| `BXorBlockView<'a, A>`| Safe read/write window; supports `subview`                    |
+| `BXorBlockReader<'a, A>` | `io::Read + io::Seek` over the view's data range            |
+| `BXorBlockWriter<'a, A>` | `io::Write + io::Seek`; recomputes checksum after every write |
+| `CHECKSUM_LENGTH`     | `4` — the XOR checksum trailer size in bytes                 |
 
 ### `BBlock<'a, A>`
 

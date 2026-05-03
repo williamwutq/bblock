@@ -7,6 +7,18 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- XOR checksum module (`xor`) — provides XOR-based checksummed blocks with
+  incremental checksum updates for improved write performance. Includes
+  `BXorBlockAllocator<A>`, `BXorBlock<'a, A>`, `BXorBlockView<'a, A>`,
+  `BXorBlockReader<'a, A>`, and `BXorBlockWriter<'a, A>` types, mirroring the
+  CRC32 API but with weaker integrity guarantees in exchange for faster writes.
+
+---
+
 ## [0.1.0] - 2026-04-27
 
 Initial release.
