@@ -22,10 +22,16 @@
 //! [`bstack::BStackGuardedSlice`] without requiring the stricter
 //! `BStackSliceAllocator` bound.
 //!
-//! Note: the wrappers cannot currently be stacked inside each other
-//! (`BXorBlockAllocator<BBlockAllocator<A>>` does not compile) because each
-//! wrapper requires its inner `A` to be a `BStackSliceAllocator`. Both must
-//! sit directly above a concrete `BStackSliceAllocator`.
+//! The wrappers can be composed freely:
+//!
+//! ```rust,no_run
+//! use bstack::{BStack, LinearBStackAllocator};
+//! use bblock::{BBlockAllocator, xor::BXorBlockAllocator};
+//!
+//! let stack = BStack::open("data.bstk").unwrap();
+//! // XOR checksum over CRC32-checksummed blocks
+//! let alloc = BXorBlockAllocator::new(BBlockAllocator::new(LinearBStackAllocator::new(stack)));
+//! ```
 //!
 //! # bstack `guarded` feature
 //!
@@ -76,6 +82,40 @@
 
 pub mod crc;
 pub mod xor;
+
+use bstack::{BStackAllocator, BStackSlice, BStackSliceAllocator};
+
+/// Retrieves the start offset of an inner allocation without consuming it.
+///
+/// Implemented for [`bstack::BStackSlice`] (base case) and for the block
+/// types produced by each wrapper allocator (recursive case).
+pub(crate) trait BlockStart {
+    fn block_start(&self) -> u64;
+}
+
+impl<'a, A: BStackAllocator> BlockStart for BStackSlice<'a, A> {
+    fn block_start(&self) -> u64 {
+        self.start()
+    }
+}
+
+/// Reconstructs an inner allocation handle from a raw `BStackSlice`.
+///
+/// # Safety
+///
+/// `slice` must be an allocation previously returned by `Self::alloc` or
+/// `Self::realloc` — passing an arbitrary slice is undefined behavior.
+pub(crate) unsafe trait BStackRawAllocator: BStackAllocator {
+    unsafe fn from_raw<'a>(slice: BStackSlice<'a, Self>) -> Self::Allocated<'a>;
+}
+
+// Every BStackSliceAllocator is trivially a BStackRawAllocator because
+// its allocated type IS the slice.
+unsafe impl<A: BStackSliceAllocator> BStackRawAllocator for A {
+    unsafe fn from_raw<'a>(slice: BStackSlice<'a, A>) -> BStackSlice<'a, A> {
+        slice
+    }
+}
 
 // Backward-compatible re-exports of the CRC32 types at the crate root.
 pub use crc::{BBlock, BBlockAllocator, BBlockReader, BBlockView, BBlockWriter, CHECKSUM_LENGTH};

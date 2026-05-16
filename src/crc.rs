@@ -75,9 +75,9 @@
 //! checksum after each mutation.
 
 use bstack::{
-    BStack, BStackAllocator, BStackGuardedSlice, BStackSlice, BStackSliceAllocator,
-    BStackSliceReader, BStackSliceWriter,
+    BStack, BStackAllocator, BStackGuardedSlice, BStackSlice, BStackSliceReader, BStackSliceWriter,
 };
+use crate::{BlockStart, BStackRawAllocator};
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -113,11 +113,11 @@ pub const CHECKSUM_LENGTH: u64 = 4;
 /// `Allocated<'_> = BBlock<'_, BBlockAllocator<A>>`. This means it can be
 /// used as the inner allocator for another wrapper, allowing checksum layers
 /// to be stacked.
-pub struct BBlockAllocator<A: BStackSliceAllocator> {
+pub struct BBlockAllocator<A: BStackAllocator> {
     inner: A,
 }
 
-impl<A: BStackSliceAllocator> BBlockAllocator<A> {
+impl<A: BStackAllocator> BBlockAllocator<A> {
     /// Create a new `BBlockAllocator` wrapping `inner`.
     pub fn new(inner: A) -> Self {
         Self { inner }
@@ -271,20 +271,10 @@ impl<'a, A: BStackAllocator> BBlock<'a, A> {
         self.slice
     }
 
-    /// # Safety
-    ///
-    /// The returned slice covers only the usable data region. Any write to it
-    /// bypasses checksum tracking; callers must maintain checksum integrity
-    /// manually or accept that the checksum will be stale.
     unsafe fn data_slice(&self) -> BStackSlice<'a, A> {
         self.slice.subslice(0, self.len)
     }
 
-    /// # Safety
-    ///
-    /// The returned slice covers the raw checksum bytes. Writing to it allows
-    /// forging an arbitrary checksum; callers must ensure the written value
-    /// correctly reflects the data region.
     unsafe fn checksum_slice(&self) -> BStackSlice<'a, A> {
         self.slice.subslice(self.len, self.len + CHECKSUM_LENGTH)
     }
@@ -292,7 +282,7 @@ impl<'a, A: BStackAllocator> BBlock<'a, A> {
 
 /// A safe read/write window into a sub-range of a [`BBlock`]'s usable data.
 ///
-/// A full-block view is obtained via [`BBlock::view`] or [`BBlockView::new`];
+/// A full-block view is obtained via [`BBlock::view`];
 /// a sub-range view via [`BBlockView::subview`]. Sub-range coordinates are
 /// always **relative** to the current view's start, mirroring the convention
 /// used by `BStackSlice::subslice`.
@@ -335,16 +325,6 @@ impl<'a, A: BStackAllocator> Clone for BBlockView<'a, A> {
 }
 
 impl<'a, A: BStackAllocator> BBlockView<'a, A> {
-    /// Create a full-block view from an existing [`BBlock`].
-    pub fn new(block: &BBlock<'a, A>) -> Self {
-        Self {
-            slice: block.slice,
-            full_len: block.len,
-            start: 0,
-            end: block.len,
-        }
-    }
-
     /// Number of bytes covered by this view.
     pub fn len(&self) -> u64 {
         self.end - self.start
@@ -667,12 +647,14 @@ impl<'a, A: BStackAllocator> io::Seek for BBlockWriter<'a, A> {
 /// Implements [`BStackAllocator`] for [`BBlockAllocator`], exposing it as a
 /// composable allocator layer.
 ///
-/// `Allocated<'_>` is `BBlock<'_, BBlockAllocator<A>>`. The inner allocator's
-/// `alloc`/`realloc`/`dealloc` calls are delegated through; outer slice
-/// references are reconstructed via `BStackSlice::from_raw_parts` so they
-/// carry the correct outer allocator type while sharing the same backing
-/// storage.
-impl<A: BStackSliceAllocator> BStackAllocator for BBlockAllocator<A> {
+/// `Allocated<'_>` is `BBlock<'_, BBlockAllocator<A>>`. Inner allocated
+/// handles are reconstructed via [`BStackRawAllocator::from_raw`] for
+/// `realloc` and `dealloc`, so no back-conversion from offset alone is needed.
+impl<A> BStackAllocator for BBlockAllocator<A>
+where
+    A: BStackAllocator<Error = io::Error> + BStackRawAllocator,
+    for<'a> A::Allocated<'a>: BlockStart + Copy,
+{
     type Error = io::Error;
     type Allocated<'a>
         = BBlock<'a, BBlockAllocator<A>>
@@ -689,7 +671,7 @@ impl<A: BStackSliceAllocator> BStackAllocator for BBlockAllocator<A> {
 
     fn alloc(&self, len: u64) -> io::Result<BBlock<'_, BBlockAllocator<A>>> {
         let inner = self.inner.alloc(len + CHECKSUM_LENGTH)?;
-        let offset = inner.start();
+        let offset = inner.block_start();
         let slice = unsafe { BStackSlice::from_raw_parts(self, offset, len + CHECKSUM_LENGTH) };
         Ok(BBlock { slice, len })
     }
@@ -700,24 +682,23 @@ impl<A: BStackSliceAllocator> BStackAllocator for BBlockAllocator<A> {
         new_len: u64,
     ) -> io::Result<BBlock<'a, BBlockAllocator<A>>> {
         let offset = block.slice.start();
-        let inner_old = unsafe {
+        let inner_old_slice = unsafe {
             BStackSlice::from_raw_parts(&self.inner, offset, block.len + CHECKSUM_LENGTH)
         };
+        let inner_old: A::Allocated<'_> = unsafe { A::from_raw(inner_old_slice) };
         let inner_new = self.inner.realloc(inner_old, new_len + CHECKSUM_LENGTH)?;
-        let new_offset = inner_new.start();
+        let new_offset = inner_new.block_start();
         let slice =
             unsafe { BStackSlice::from_raw_parts(self, new_offset, new_len + CHECKSUM_LENGTH) };
-        Ok(BBlock {
-            slice,
-            len: new_len,
-        })
+        Ok(BBlock { slice, len: new_len })
     }
 
     fn dealloc(&self, block: BBlock<'_, BBlockAllocator<A>>) -> io::Result<()> {
         let offset = block.slice.start();
-        let inner = unsafe {
+        let inner_slice = unsafe {
             BStackSlice::from_raw_parts(&self.inner, offset, block.len + CHECKSUM_LENGTH)
         };
+        let inner: A::Allocated<'_> = unsafe { A::from_raw(inner_slice) };
         self.inner.dealloc(inner)
     }
 }
@@ -725,13 +706,34 @@ impl<A: BStackSliceAllocator> BStackAllocator for BBlockAllocator<A> {
 /// Satisfies the `Allocated<'a>: TryInto<BStackSlice<'a, Self>>` bound
 /// required by [`BStackAllocator`]. The conversion is infallible: the raw
 /// backing slice is returned as-is.
-impl<'a, A: BStackSliceAllocator> TryInto<BStackSlice<'a, BBlockAllocator<A>>>
-    for BBlock<'a, BBlockAllocator<A>>
+impl<'a, A> TryInto<BStackSlice<'a, BBlockAllocator<A>>> for BBlock<'a, BBlockAllocator<A>>
+where
+    A: BStackAllocator<Error = io::Error> + BStackRawAllocator,
+    for<'b> A::Allocated<'b>: BlockStart + Copy,
 {
     type Error = std::convert::Infallible;
 
     fn try_into(self) -> Result<BStackSlice<'a, BBlockAllocator<A>>, Self::Error> {
         Ok(self.slice)
+    }
+}
+
+impl<'a, A: BStackAllocator> BlockStart for BBlock<'a, A> {
+    fn block_start(&self) -> u64 {
+        self.slice.start()
+    }
+}
+
+unsafe impl<A> BStackRawAllocator for BBlockAllocator<A>
+where
+    A: BStackAllocator<Error = io::Error> + BStackRawAllocator,
+    for<'a> A::Allocated<'a>: BlockStart + Copy,
+{
+    unsafe fn from_raw<'a>(
+        slice: BStackSlice<'a, BBlockAllocator<A>>,
+    ) -> BBlock<'a, BBlockAllocator<A>> {
+        let len = slice.len() - CHECKSUM_LENGTH;
+        BBlock { slice, len }
     }
 }
 
