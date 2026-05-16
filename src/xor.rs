@@ -30,6 +30,20 @@
 //! For example, swapping two bytes at the same position-modulo-4 leaves the
 //! XOR checksum unchanged. Use [`crate::crc`] when detection strength matters
 //! more than write throughput.
+//!
+//! # Composability
+//!
+//! [`BXorBlockAllocator`] itself implements [`bstack::BStackAllocator`] with
+//! `Allocated<'_> = BXorBlock<'_, BXorBlockAllocator<A>>`, so it can be used
+//! as the inner allocator for another wrapper layer.
+//!
+//! # bstack `guarded` feature
+//!
+//! [`BXorBlock`] implements [`bstack::BStackGuardedSlice`] (requires the
+//! bstack `guarded` feature, enabled by default in this crate). `as_slice()`
+//! exposes only the data region. Both `write()` and `zero()` update the XOR
+//! checksum **incrementally** — only the bytes that change are re-read from
+//! storage.
 
 use bstack::{
     BStack, BStackAllocator, BStackGuardedSlice, BStackSlice, BStackSliceAllocator,
@@ -61,6 +75,13 @@ fn xor_checksum(data: &[u8]) -> u32 {
 /// but returns [`BXorBlock`]s instead of raw [`BStackSlice`]s. Each block has
 /// `CHECKSUM_LENGTH` (4) extra bytes appended, so `alloc(n)` allocates `n + 4`
 /// bytes in the underlying stack.
+///
+/// ## `BStackAllocator` impl
+///
+/// `BXorBlockAllocator<A>` itself implements [`BStackAllocator`] with
+/// `Allocated<'_> = BXorBlock<'_, BXorBlockAllocator<A>>`. This means it can
+/// be used as the inner allocator for another wrapper, allowing checksum layers
+/// to be stacked.
 pub struct BXorBlockAllocator<A: BStackSliceAllocator> {
     inner: A,
 }
@@ -111,6 +132,14 @@ impl<A: BStackSliceAllocator> BXorBlockAllocator<A> {
 /// **Backing layout:** `[data: len bytes][xor: 4 bytes LE]`
 ///
 /// `BXorBlock` is `Copy`: every copy refers to the same physical region.
+///
+/// ## `BStackGuardedSlice`
+///
+/// `BXorBlock` implements [`bstack::BStackGuardedSlice`] (requires the bstack
+/// `guarded` feature, enabled by default in this crate). `as_slice()` returns
+/// only the data region. `write()` and `zero()` update the XOR checksum
+/// **incrementally**: only the bytes that change are re-read, preserving the
+/// efficiency advantage of the XOR scheme over CRC32.
 #[derive(Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BXorBlock<'a, A: BStackAllocator> {
     slice: BStackSlice<'a, A>,
@@ -623,6 +652,14 @@ impl<'a, A: BStackAllocator> io::Seek for BXorBlockWriter<'a, A> {
     }
 }
 
+/// Implements [`BStackAllocator`] for [`BXorBlockAllocator`], exposing it as
+/// a composable allocator layer.
+///
+/// `Allocated<'_>` is `BXorBlock<'_, BXorBlockAllocator<A>>`. The inner
+/// allocator's `alloc`/`realloc`/`dealloc` calls are delegated through; outer
+/// slice references are reconstructed via `BStackSlice::from_raw_parts` so
+/// they carry the correct outer allocator type while sharing the same backing
+/// storage.
 impl<A: BStackSliceAllocator> BStackAllocator for BXorBlockAllocator<A> {
     type Error = io::Error;
     type Allocated<'a>
@@ -673,6 +710,9 @@ impl<A: BStackSliceAllocator> BStackAllocator for BXorBlockAllocator<A> {
     }
 }
 
+/// Satisfies the `Allocated<'a>: TryInto<BStackSlice<'a, Self>>` bound
+/// required by [`BStackAllocator`]. The conversion is infallible: the raw
+/// backing slice is returned as-is.
 impl<'a, A: BStackSliceAllocator> TryInto<BStackSlice<'a, BXorBlockAllocator<A>>>
     for BXorBlock<'a, BXorBlockAllocator<A>>
 {
@@ -683,6 +723,16 @@ impl<'a, A: BStackSliceAllocator> TryInto<BStackSlice<'a, BXorBlockAllocator<A>>
     }
 }
 
+/// Implements [`BStackGuardedSlice`] for [`BXorBlock`].
+///
+/// * `as_slice()` returns the data region only (excludes the 4-byte checksum
+///   trailer), so callers read and write only usable payload bytes.
+/// * `write()` reads the bytes about to be overwritten, writes the new data,
+///   then updates the checksum via `cs[i % 4] ^= old[i] ^ new[i]` — only the
+///   written range is touched.
+/// * `zero()` reads the current data, zeroes the region, then XORs each old
+///   byte out of the checksum. Both operations are incremental and avoid
+///   reading the full block.
 impl<'a, A: BStackAllocator + 'a> BStackGuardedSlice<'a, A> for BXorBlock<'a, A> {
     fn len(&self) -> u64 {
         self.len

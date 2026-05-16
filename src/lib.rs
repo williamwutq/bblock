@@ -14,6 +14,25 @@
 //! [`BBlock`], [`BBlockView`], [`BBlockReader`], [`BBlockWriter`]) are
 //! re-exported at the crate root for backward compatibility.
 //!
+//! # Composability
+//!
+//! Both allocator wrappers implement [`bstack::BStackAllocator`] themselves,
+//! so they can be stacked. For example, a `BXorBlockAllocator<BBlockAllocator<A>>`
+//! gives you XOR-checksummed allocations where each inner slot is already
+//! CRC32-protected. The two checksum layers are independent: each write through
+//! the outer allocator updates both checksums.
+//!
+//! # bstack `guarded` feature
+//!
+//! When bstack is built with the `guarded` feature (enabled by default in this
+//! crate), both [`BBlock`] and [`BXorBlock`] implement
+//! [`bstack::BStackGuardedSlice`]. This lets them be used as guarded regions
+//! with bstack's generic guarded-I/O infrastructure:
+//!
+//! * `as_slice()` returns the data region only (the checksum trailer is hidden).
+//! * `write()` and `zero()` automatically keep the checksum consistent.
+//!   `BBlock` recomputes the full CRC32; `BXorBlock` updates incrementally.
+//!
 //! # Detection, not recovery
 //!
 //! `bblock` only **detects** corruption — it does not repair or revert. A
@@ -55,4 +74,5 @@ pub mod xor;
 
 // Backward-compatible re-exports of the CRC32 types at the crate root.
 pub use crc::{BBlock, BBlockAllocator, BBlockReader, BBlockView, BBlockWriter, CHECKSUM_LENGTH};
+// XOR types also re-exported at the crate root for convenience.
 pub use xor::{BXorBlock, BXorBlockAllocator, BXorBlockReader, BXorBlockView, BXorBlockWriter};

@@ -1,8 +1,10 @@
 # bblock
 
 `bblock` wraps [`bstack`](https://crates.io/crates/bstack) allocators to provide
-persistent, checksummed blocks. Every allocation carries a 4-byte CRC32 trailer;
-`verify()` tells you at any time whether the stored bytes match the checksum.
+persistent, checksummed blocks. Two checksum strategies are available: **CRC32**
+for stronger integrity guarantees and **XOR** for faster incremental updates.
+Every allocation carries a 4-byte checksum trailer; `verify()` tells you at any
+time whether the stored bytes match the checksum.
 
 [![Crates.io](https://img.shields.io/crates/v/bblock)](https://crates.io/crates/bblock)
 [![Docs.rs](https://img.shields.io/docsrs/bblock)](https://docs.rs/bblock)
@@ -12,10 +14,16 @@ persistent, checksummed blocks. Every allocation carries a 4-byte CRC32 trailer;
 
 ## Features
 
-- **Transparent checksumming** — allocate as usual; the 4-byte CRC32 trailer is
+- **Transparent checksumming** — allocate as usual; the 4-byte checksum trailer is
   managed automatically by the safe API.
-- **XOR checksum option** — use the `xor` module for faster incremental checksum
-  updates on writes, at the cost of weaker error detection compared to CRC32.
+- **Two checksum strategies** — CRC32 (`crc` module / crate root) for stronger
+  error detection; XOR (`xor` module) for faster incremental updates on writes.
+- **Composability** — both allocator wrappers implement `BStackAllocator`
+  themselves, so they can be stacked. `BXorBlockAllocator<BBlockAllocator<A>>`
+  gives XOR-checksummed allocations where each inner slot is also CRC32-protected.
+- **`guarded` feature** — `BBlock` and `BXorBlock` implement
+  `bstack::BStackGuardedSlice`. `as_slice()` hides the checksum trailer;
+  `write()` and `zero()` keep the checksum consistent automatically.
 - **Sub-range views** — `BBlockView::subview(start, end)` lets you operate on a
   named field of a record; writes still update the full-block checksum.
 - **Cursor-based I/O** — `BBlockReader` and `BBlockWriter` implement
@@ -31,8 +39,8 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-bblock = "0.1"
-bstack = { version = ">=0.1.6", features = ["alloc", "set"] }
+bblock = "0.2"
+bstack = { version = "0.2", features = ["alloc", "set", "guarded"] }
 ```
 
 ```rust,no_run
@@ -50,9 +58,9 @@ let view = block.view();
 view.write(b"hello, bblock!!!").unwrap();
 assert!(view.verify().unwrap()); // checksum is valid
 
-// Sub-range views update the full-block checksum automatically.
+// Sub-range views update the checksum automatically.
 view.subview(0, 5).write(b"world").unwrap();
-assert!(block.verify().unwrap()); // still valid; full block was re-checksummed
+assert!(block.verify().unwrap()); // still valid; full CRC32 was recomputed
 
 // Cursor-based writer.
 use std::io::Write;
@@ -65,11 +73,11 @@ assert!(block.verify().unwrap());
 
 ## XOR checksum (faster writes)
 
-For better write performance with incremental checksum updates:
+XOR types are available at the crate root and in the `xor` module.
 
 ```rust,no_run
 use bstack::{BStack, LinearBStackAllocator};
-use bblock::xor::BXorBlockAllocator;
+use bblock::BXorBlockAllocator;
 
 // Open (or create) a bstack file and wrap the allocator.
 let stack = BStack::open("data.bstk").unwrap();
@@ -82,9 +90,9 @@ let view = block.view();
 view.write(b"hello, bblock!!!").unwrap();
 assert!(view.verify().unwrap()); // checksum is valid
 
-// Sub-range views update the full-block checksum automatically.
+// Subview writes update the checksum incrementally (reads only changed bytes).
 view.subview(0, 5).write(b"world").unwrap();
-assert!(block.verify().unwrap()); // still valid; full block was re-checksummed
+assert!(block.verify().unwrap()); // still valid; checksum updated incrementally
 
 // Cursor-based writer.
 use std::io::Write;
@@ -95,27 +103,57 @@ assert!(block.verify().unwrap());
 
 ---
 
+## Composability
+
+Both allocator wrappers implement `BStackAllocator` themselves, so they can be
+stacked. For example, a `BXorBlockAllocator<BBlockAllocator<A>>` gives you
+XOR-checksummed allocations where each inner slot is also CRC32-protected:
+
+```rust,no_run
+use bstack::{BStack, LinearBStackAllocator};
+use bblock::{BBlockAllocator, BXorBlockAllocator};
+
+let stack = BStack::open("data.bstk").unwrap();
+let alloc = BXorBlockAllocator::new(BBlockAllocator::new(LinearBStackAllocator::new(stack)));
+// alloc.alloc(n) writes n + 4 (XOR) + 4 (CRC32) bytes to disk.
+```
+
+---
+
+## bstack `guarded` feature
+
+When bstack is built with the `guarded` feature (enabled by default in this
+crate's `Cargo.toml`), `BBlock` and `BXorBlock` implement
+`bstack::BStackGuardedSlice`:
+
+* `as_slice()` returns only the data region — the checksum trailer is hidden.
+* `write()` writes data and keeps the checksum consistent. `BBlock` recomputes
+  the full CRC32; `BXorBlock` updates incrementally.
+* `zero()` zeroes the data region and updates the checksum accordingly.
+
+---
+
 ## API overview
 
-| Type                  | Description                                                   |
-|-----------------------|---------------------------------------------------------------|
-| `BBlockAllocator<A>`  | Wraps `A: BStackAllocator`; `alloc`, `realloc`, `dealloc`     |
-| `BBlock<'a, A>`       | Checksummed block handle; `Copy`; source of views and cursors |
-| `BBlockView<'a, A>`   | Safe read/write window; supports `subview`                    |
-| `BBlockReader<'a, A>` | `io::Read + io::Seek` over the view's data range              |
-| `BBlockWriter<'a, A>` | `io::Write + io::Seek`; recomputes checksum after every write |
-| `CHECKSUM_LENGTH`     | `4` — the CRC32 trailer size in bytes                         |
+| Type                  | Description                                                          |
+|-----------------------|----------------------------------------------------------------------|
+| `BBlockAllocator<A>`  | Wraps `A: BStackAllocator`; `alloc`, `realloc`, `dealloc`            |
+| `BBlock<'a, A>`       | Checksummed block handle; `Copy`; source of views and cursors        |
+| `BBlockView<'a, A>`   | Safe read/write window; supports `subview`                           |
+| `BBlockReader<'a, A>` | `io::Read + io::Seek` over the view's data range                     |
+| `BBlockWriter<'a, A>` | `io::Write + io::Seek`; recomputes full CRC32 after every write      |
+| `CHECKSUM_LENGTH`     | `4` — the CRC32 trailer size in bytes                                |
 
-### XOR Module Types
+### XOR module types (also re-exported at crate root)
 
-| Type                  | Description                                                   |
-|-----------------------|---------------------------------------------------------------|
-| `BXorBlockAllocator<A>` | Wraps `A: BStackAllocator`; `alloc`, `realloc`, `dealloc`     |
-| `BXorBlock<'a, A>`    | Checksummed block handle; `Copy`; source of views and cursors |
-| `BXorBlockView<'a, A>`| Safe read/write window; supports `subview`                    |
-| `BXorBlockReader<'a, A>` | `io::Read + io::Seek` over the view's data range            |
-| `BXorBlockWriter<'a, A>` | `io::Write + io::Seek`; recomputes checksum after every write |
-| `CHECKSUM_LENGTH`     | `4` — the XOR checksum trailer size in bytes                 |
+| Type                     | Description                                                          |
+|--------------------------|----------------------------------------------------------------------|
+| `BXorBlockAllocator<A>`  | Wraps `A: BStackAllocator`; `alloc`, `realloc`, `dealloc`            |
+| `BXorBlock<'a, A>`       | Checksummed block handle; `Copy`; source of views and cursors        |
+| `BXorBlockView<'a, A>`   | Safe read/write window; supports `subview`                           |
+| `BXorBlockReader<'a, A>` | `io::Read + io::Seek` over the view's data range                     |
+| `BXorBlockWriter<'a, A>` | `io::Write + io::Seek`; updates XOR checksum incrementally           |
+| `xor::CHECKSUM_LENGTH`   | `4` — the XOR checksum trailer size in bytes                         |
 
 ### `BBlock<'a, A>`
 

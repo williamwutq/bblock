@@ -53,6 +53,27 @@
 //! Every write recomputes CRC32 over the **full block data**, regardless of how
 //! many bytes were changed. For large blocks with many small writes, prefer the
 //! [`xor`](crate::xor) types which update the checksum incrementally.
+//!
+//! # Composability
+//!
+//! [`BBlockAllocator`] itself implements [`BStackAllocator`], so it can be
+//! used as the inner allocator for another wrapper. For example:
+//!
+//! ```rust,no_run
+//! use bstack::{BStack, LinearBStackAllocator};
+//! use bblock::BBlockAllocator;
+//! use bblock::xor::BXorBlockAllocator;
+//!
+//! let stack = BStack::open("data.bstk").unwrap();
+//! // Outer XOR layer wrapping an inner CRC32 layer.
+//! let alloc = BXorBlockAllocator::new(BBlockAllocator::new(LinearBStackAllocator::new(stack)));
+//! ```
+//!
+//! # bstack `guarded` feature
+//!
+//! [`BBlock`] implements [`bstack::BStackGuardedSlice`]. `as_slice()` exposes
+//! only the data region; `write()` and `zero()` both recompute the CRC32
+//! checksum after each mutation.
 
 use bstack::{
     BStack, BStackAllocator, BStackGuardedSlice, BStackSlice, BStackSliceAllocator,
@@ -86,6 +107,13 @@ pub const CHECKSUM_LENGTH: u64 = 4;
 /// No concrete allocator type is imported; the crate is intentionally
 /// allocator-agnostic and works with any type that satisfies
 /// `A: BStackAllocator`.
+///
+/// ## `BStackAllocator` impl
+///
+/// `BBlockAllocator<A>` itself implements [`BStackAllocator`] with
+/// `Allocated<'_> = BBlock<'_, BBlockAllocator<A>>`. This means it can be
+/// used as the inner allocator for another wrapper, allowing checksum layers
+/// to be stacked.
 pub struct BBlockAllocator<A: BStackSliceAllocator> {
     inner: A,
 }
@@ -151,6 +179,13 @@ impl<A: BStackSliceAllocator> BBlockAllocator<A> {
 ///
 /// [`reader`](BBlock::reader) and [`writer`](BBlock::writer) provide
 /// cursor-based `io::Read`/`io::Write` access with the same checksum guarantees.
+///
+/// ## `BStackGuardedSlice`
+///
+/// `BBlock` implements [`bstack::BStackGuardedSlice`] (requires the bstack
+/// `guarded` feature, enabled by default in this crate). `as_slice()` returns
+/// only the data region, hiding the checksum trailer. `write()` and `zero()`
+/// recompute the CRC32 checksum after each mutation.
 ///
 /// ## Unsafe escape hatch
 ///
@@ -682,6 +717,14 @@ impl<'a, A: BStackAllocator> io::Seek for BBlockWriter<'a, A> {
     }
 }
 
+/// Implements [`BStackAllocator`] for [`BBlockAllocator`], exposing it as a
+/// composable allocator layer.
+///
+/// `Allocated<'_>` is `BBlock<'_, BBlockAllocator<A>>`. The inner allocator's
+/// `alloc`/`realloc`/`dealloc` calls are delegated through; outer slice
+/// references are reconstructed via `BStackSlice::from_raw_parts` so they
+/// carry the correct outer allocator type while sharing the same backing
+/// storage.
 impl<A: BStackSliceAllocator> BStackAllocator for BBlockAllocator<A> {
     type Error = io::Error;
     type Allocated<'a>
@@ -725,12 +768,16 @@ impl<A: BStackSliceAllocator> BStackAllocator for BBlockAllocator<A> {
 
     fn dealloc(&self, block: BBlock<'_, BBlockAllocator<A>>) -> io::Result<()> {
         let offset = block.slice.start();
-        let inner =
-            unsafe { BStackSlice::from_raw_parts(&self.inner, offset, block.len + CHECKSUM_LENGTH) };
+        let inner = unsafe {
+            BStackSlice::from_raw_parts(&self.inner, offset, block.len + CHECKSUM_LENGTH)
+        };
         self.inner.dealloc(inner)
     }
 }
 
+/// Satisfies the `Allocated<'a>: TryInto<BStackSlice<'a, Self>>` bound
+/// required by [`BStackAllocator`]. The conversion is infallible: the raw
+/// backing slice is returned as-is.
 impl<'a, A: BStackSliceAllocator> TryInto<BStackSlice<'a, BBlockAllocator<A>>>
     for BBlock<'a, BBlockAllocator<A>>
 {
@@ -741,6 +788,16 @@ impl<'a, A: BStackSliceAllocator> TryInto<BStackSlice<'a, BBlockAllocator<A>>>
     }
 }
 
+/// Implements [`BStackGuardedSlice`] for [`BBlock`].
+///
+/// * `as_slice()` returns the data region only (excludes the 4-byte checksum
+///   trailer), so callers read and write only usable payload bytes.
+/// * `write()` writes to the data region and recomputes the CRC32 checksum
+///   over the entire data region.
+/// * `zero()` zeroes the data region and recomputes the CRC32 checksum.
+///
+/// Both `write` and `zero` are overridden directly (rather than using the
+/// `post_write` hook) so the checksum is always consistent after the call.
 impl<'a, A: BStackAllocator + 'a> BStackGuardedSlice<'a, A> for BBlock<'a, A> {
     fn len(&self) -> u64 {
         self.len
