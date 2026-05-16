@@ -106,17 +106,14 @@ assert!(block.verify().unwrap());
 ## Composability
 
 Both allocator wrappers implement `BStackAllocator` themselves, so they can be
-stacked. For example, a `BXorBlockAllocator<BBlockAllocator<A>>` gives you
-XOR-checksummed allocations where each inner slot is also CRC32-protected:
+passed to any generic API that accepts `T: BStackAllocator`. This is what
+allows `BBlock` and `BXorBlock` to implement `BStackGuardedSlice` without
+requiring the stricter `BStackSliceAllocator` bound.
 
-```rust,no_run
-use bstack::{BStack, LinearBStackAllocator};
-use bblock::{BBlockAllocator, BXorBlockAllocator};
-
-let stack = BStack::open("data.bstk").unwrap();
-let alloc = BXorBlockAllocator::new(BBlockAllocator::new(LinearBStackAllocator::new(stack)));
-// alloc.alloc(n) writes n + 4 (XOR) + 4 (CRC32) bytes to disk.
-```
+> **Note:** the wrappers cannot currently be stacked inside each other.
+> `BXorBlockAllocator<BBlockAllocator<A>>` does not compile because both
+> wrappers require their inner `A` to be a `BStackSliceAllocator`; each must
+> sit directly above a concrete allocator such as `LinearBStackAllocator`.
 
 ---
 

@@ -34,8 +34,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **`BStackAllocator` impls** — both `BBlockAllocator<A>` and
   `BXorBlockAllocator<A>` now implement `bstack::BStackAllocator` with
   `Allocated<'_>` set to the corresponding block type. This makes the
-  allocator wrappers composable: one can be used as the inner allocator of
-  another (e.g. `BXorBlockAllocator<BBlockAllocator<A>>`).
+  allocator wrappers usable in any generic context that accepts
+  `T: BStackAllocator`, and is what enables the `BStackGuardedSlice` impls
+  (see below). Note: the wrappers cannot be stacked inside each other because
+  each requires its inner `A` to satisfy `BStackSliceAllocator`.
 - **`TryInto<BStackSlice>` impls** — `BBlock` and `BXorBlock` implement
   `TryInto<BStackSlice<'_, Self::Allocator>>` to satisfy the
   `BStackAllocator::Allocated` bound. Both conversions are infallible.

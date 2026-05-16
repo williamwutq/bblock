@@ -17,10 +17,15 @@
 //! # Composability
 //!
 //! Both allocator wrappers implement [`bstack::BStackAllocator`] themselves,
-//! so they can be stacked. For example, a `BXorBlockAllocator<BBlockAllocator<A>>`
-//! gives you XOR-checksummed allocations where each inner slot is already
-//! CRC32-protected. The two checksum layers are independent: each write through
-//! the outer allocator updates both checksums.
+//! so they can be used in any generic context that accepts `T: BStackAllocator`.
+//! This is what allows [`BBlock`] and [`BXorBlock`] to implement
+//! [`bstack::BStackGuardedSlice`] without requiring the stricter
+//! `BStackSliceAllocator` bound.
+//!
+//! Note: the wrappers cannot currently be stacked inside each other
+//! (`BXorBlockAllocator<BBlockAllocator<A>>` does not compile) because each
+//! wrapper requires its inner `A` to be a `BStackSliceAllocator`. Both must
+//! sit directly above a concrete `BStackSliceAllocator`.
 //!
 //! # bstack `guarded` feature
 //!

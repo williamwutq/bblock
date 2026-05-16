@@ -56,18 +56,17 @@
 //!
 //! # Composability
 //!
-//! [`BBlockAllocator`] itself implements [`BStackAllocator`], so it can be
-//! used as the inner allocator for another wrapper. For example:
+//! [`BBlockAllocator`] implements [`BStackAllocator`], so it can be passed to
+//! any generic API that accepts `T: BStackAllocator`. In particular, this is
+//! what allows [`BBlock`] to implement [`bstack::BStackGuardedSlice`] without
+//! requiring the stricter `BStackSliceAllocator` bound.
 //!
-//! ```rust,no_run
-//! use bstack::{BStack, LinearBStackAllocator};
-//! use bblock::BBlockAllocator;
-//! use bblock::xor::BXorBlockAllocator;
-//!
-//! let stack = BStack::open("data.bstk").unwrap();
-//! // Outer XOR layer wrapping an inner CRC32 layer.
-//! let alloc = BXorBlockAllocator::new(BBlockAllocator::new(LinearBStackAllocator::new(stack)));
-//! ```
+//! Note: [`BBlockAllocator`] cannot currently be used as the inner allocator
+//! for another [`BBlockAllocator`] or [`bblock::xor::BXorBlockAllocator`],
+//! because those wrappers require their inner `A` to be a
+//! `BStackSliceAllocator` (where `Allocated<'_> = BStackSlice<'_, A>`), which
+//! `BBlockAllocator` is not. Each wrapper must sit directly above a
+//! `BStackSliceAllocator` such as [`bstack::LinearBStackAllocator`].
 //!
 //! # bstack `guarded` feature
 //!
