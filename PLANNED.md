@@ -169,3 +169,27 @@ For non-breaking compatibility:
 
 ---
 
+## Relax Allocator Constraint to `BStackAllocator` with `io::Error`
+
+**Breaking change:** No
+
+### Motivation
+
+Currently, `BBlockAllocator<A>` and `BXorBlockAllocator<A>` require `A: BStackSliceAllocator`, which prevents composability. You cannot write `BXorBlockAllocator<BBlockAllocator<A>>` because `BBlockAllocator` implements `BStackAllocator` but not `BStackSliceAllocator`.
+
+This blocks useful patterns: double checksumming (XOR over CRC), checksumming compressed blocks, or custom wrapper compositions. The constraint is more restrictive than necessary—the implementation only needs `BStackAllocator` with `Error = io::Error` and a way to convert the allocated type to `BStackSlice`.
+
+### Design
+
+Relax the bound from `A: BStackSliceAllocator` to `A: BStackAllocator<Error = io::Error>`. The `BStackAllocator` trait already requires `type Allocated<'a>: TryInto<BStackSlice<'a, Self>>`, so conversion is built-in. We just need to additionally constrain that the conversion error type is `io::Error` to enable ergonomic error propagation.
+
+This allows any allocator that produces convertible allocations to work, enabling composition while maintaining type safety.
+
+After this change:
+```rust
+let xor_crc_alloc = BXorBlockAllocator::new(BBlockAllocator::new(linear_alloc));
+let crc_compressed_alloc = BBlockAllocator::new(BCompressedBlockAllocator::new(linear_alloc));
+```
+
+---
+
