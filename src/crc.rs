@@ -59,14 +59,9 @@
 //! [`BBlockAllocator`] implements [`BStackAllocator`], so it can be passed to
 //! any generic API that accepts `T: BStackAllocator`. In particular, this is
 //! what allows [`BBlock`] to implement [`bstack::BStackGuardedSlice`] without
-//! requiring the stricter `BStackSliceAllocator` bound.
-//!
-//! Note: [`BBlockAllocator`] cannot currently be used as the inner allocator
-//! for another [`BBlockAllocator`] or [`bblock::xor::BXorBlockAllocator`],
-//! because those wrappers require their inner `A` to be a
-//! `BStackSliceAllocator` (where `Allocated<'_> = BStackSlice<'_, A>`), which
-//! `BBlockAllocator` is not. Each wrapper must sit directly above a
-//! `BStackSliceAllocator` such as [`bstack::LinearBStackAllocator`].
+//! requiring the stricter `BStackSliceAllocator` bound. It also means the
+//! wrappers can be stacked: `BXorBlockAllocator<BBlockAllocator<A>>` and
+//! `BBlockAllocator<BXorBlockAllocator<A>>` both compile.
 //!
 //! # bstack `guarded` feature
 //!
@@ -74,10 +69,10 @@
 //! only the data region; `write()` and `zero()` both recompute the CRC32
 //! checksum after each mutation.
 
+use crate::{BStackRawAllocator, BlockStart};
 use bstack::{
     BStack, BStackAllocator, BStackGuardedSlice, BStackSlice, BStackSliceReader, BStackSliceWriter,
 };
-use crate::{BlockStart, BStackRawAllocator};
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -190,6 +185,28 @@ impl<'a, A: BStackAllocator> BBlock<'a, A> {
     /// Returns `true` if this block has zero usable bytes.
     pub fn is_empty(&self) -> bool {
         self.len == 0
+    }
+
+    /// Serialize this block reference as a 16-byte array.
+    ///
+    /// The format is `[offset: u64 LE | usable_len: u64 LE]`. Reconstruct
+    /// with [`BBlock::from_bytes`].
+    pub fn to_bytes(&self) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        out[..8].copy_from_slice(&self.slice.start().to_le_bytes());
+        out[8..].copy_from_slice(&self.len.to_le_bytes());
+        out
+    }
+
+    /// Reconstruct a block reference from a 16-byte array produced by
+    /// [`BBlock::to_bytes`].
+    pub fn from_bytes(allocator: &'a A, bytes: [u8; 16]) -> Self {
+        let offset = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+        let len = u64::from_le_bytes(bytes[8..].try_into().unwrap());
+        BBlock {
+            slice: unsafe { BStackSlice::from_raw_parts(allocator, offset, len + CHECKSUM_LENGTH) },
+            len,
+        }
     }
 
     /// Read the stored CRC32 checksum from the backing store.
@@ -324,7 +341,23 @@ impl<'a, A: BStackAllocator> Clone for BBlockView<'a, A> {
     }
 }
 
+impl<'a, A: BStackAllocator> From<BBlock<'a, A>> for [u8; 16] {
+    fn from(block: BBlock<'a, A>) -> [u8; 16] {
+        block.to_bytes()
+    }
+}
+
 impl<'a, A: BStackAllocator> BBlockView<'a, A> {
+    /// Create a full-block view from an existing [`BBlock`].
+    pub fn new(block: &BBlock<'a, A>) -> Self {
+        Self {
+            slice: block.slice,
+            full_len: block.len,
+            start: 0,
+            end: block.len,
+        }
+    }
+
     /// Number of bytes covered by this view.
     pub fn len(&self) -> u64 {
         self.end - self.start
@@ -690,7 +723,10 @@ where
         let new_offset = inner_new.block_start();
         let slice =
             unsafe { BStackSlice::from_raw_parts(self, new_offset, new_len + CHECKSUM_LENGTH) };
-        Ok(BBlock { slice, len: new_len })
+        Ok(BBlock {
+            slice,
+            len: new_len,
+        })
     }
 
     fn dealloc(&self, block: BBlock<'_, BBlockAllocator<A>>) -> io::Result<()> {
@@ -828,6 +864,18 @@ mod tests {
         assert_eq!(block2.len(), 8);
         let raw_len = unsafe { block2.into_slice().len() };
         assert_eq!(raw_len, 12);
+    }
+
+    #[test]
+    fn test_to_from_bytes() {
+        let (alloc, _f) = make_allocator();
+        let block = alloc.alloc(8).unwrap();
+        block.view().write(&b"rustacean"[..8]).unwrap();
+        let bytes: [u8; 16] = block.into();
+        let block2 = BBlock::from_bytes(alloc.inner(), bytes);
+        assert_eq!(block2.len(), 8);
+        assert!(block2.verify().unwrap());
+        assert_eq!(block2.view().read().unwrap(), &b"rustacean"[..8]);
     }
 
     #[test]

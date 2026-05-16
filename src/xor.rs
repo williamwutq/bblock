@@ -45,10 +45,10 @@
 //! checksum **incrementally** — only the bytes that change are re-read from
 //! storage.
 
+use crate::{BStackRawAllocator, BlockStart};
 use bstack::{
     BStack, BStackAllocator, BStackGuardedSlice, BStackSlice, BStackSliceReader, BStackSliceWriter,
 };
-use crate::{BlockStart, BStackRawAllocator};
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -139,6 +139,28 @@ impl<'a, A: BStackAllocator> BXorBlock<'a, A> {
     /// Returns `true` if this block has zero usable bytes.
     pub fn is_empty(&self) -> bool {
         self.len == 0
+    }
+
+    /// Serialize this block reference as a 16-byte array.
+    ///
+    /// The format is `[offset: u64 LE | usable_len: u64 LE]`. Reconstruct
+    /// with [`BXorBlock::from_bytes`].
+    pub fn to_bytes(&self) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        out[..8].copy_from_slice(&self.slice.start().to_le_bytes());
+        out[8..].copy_from_slice(&self.len.to_le_bytes());
+        out
+    }
+
+    /// Reconstruct a block reference from a 16-byte array produced by
+    /// [`BXorBlock::to_bytes`].
+    pub fn from_bytes(allocator: &'a A, bytes: [u8; 16]) -> Self {
+        let offset = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+        let len = u64::from_le_bytes(bytes[8..].try_into().unwrap());
+        BXorBlock {
+            slice: unsafe { BStackSlice::from_raw_parts(allocator, offset, len + CHECKSUM_LENGTH) },
+            len,
+        }
     }
 
     /// Read the stored XOR checksum from the backing store.
@@ -247,7 +269,23 @@ impl<'a, A: BStackAllocator> Clone for BXorBlockView<'a, A> {
     }
 }
 
+impl<'a, A: BStackAllocator> From<BXorBlock<'a, A>> for [u8; 16] {
+    fn from(block: BXorBlock<'a, A>) -> [u8; 16] {
+        block.to_bytes()
+    }
+}
+
 impl<'a, A: BStackAllocator> BXorBlockView<'a, A> {
+    /// Create a full-block view from an existing [`BXorBlock`].
+    pub fn new(block: &BXorBlock<'a, A>) -> Self {
+        Self {
+            slice: block.slice,
+            full_len: block.len,
+            start: 0,
+            end: block.len,
+        }
+    }
+
     /// Number of bytes covered by this view.
     pub fn len(&self) -> u64 {
         self.end - self.start
@@ -636,7 +674,10 @@ where
         let new_offset = inner_new.block_start();
         let slice =
             unsafe { BStackSlice::from_raw_parts(self, new_offset, new_len + CHECKSUM_LENGTH) };
-        Ok(BXorBlock { slice, len: new_len })
+        Ok(BXorBlock {
+            slice,
+            len: new_len,
+        })
     }
 
     fn dealloc(&self, block: BXorBlock<'_, BXorBlockAllocator<A>>) -> io::Result<()> {
@@ -652,8 +693,7 @@ where
 /// Satisfies the `Allocated<'a>: TryInto<BStackSlice<'a, Self>>` bound
 /// required by [`BStackAllocator`]. The conversion is infallible: the raw
 /// backing slice is returned as-is.
-impl<'a, A> TryInto<BStackSlice<'a, BXorBlockAllocator<A>>>
-    for BXorBlock<'a, BXorBlockAllocator<A>>
+impl<'a, A> TryInto<BStackSlice<'a, BXorBlockAllocator<A>>> for BXorBlock<'a, BXorBlockAllocator<A>>
 where
     A: BStackAllocator<Error = io::Error> + BStackRawAllocator,
     for<'b> A::Allocated<'b>: BlockStart + Copy,
@@ -819,6 +859,18 @@ mod tests {
         assert!(block.verify().unwrap());
         let data = block.view().read().unwrap();
         assert_eq!(data, b"ab\x00\x00\x00\x00gh");
+    }
+
+    #[test]
+    fn test_to_from_bytes() {
+        let (alloc, _f) = make_allocator();
+        let block = alloc.alloc(8).unwrap();
+        block.view().write(&b"rustacean"[..8]).unwrap();
+        let bytes: [u8; 16] = block.into();
+        let block2 = BXorBlock::from_bytes(alloc.inner(), bytes);
+        assert_eq!(block2.len(), 8);
+        assert!(block2.verify().unwrap());
+        assert_eq!(block2.view().read().unwrap(), &b"rustacean"[..8]);
     }
 
     #[test]
