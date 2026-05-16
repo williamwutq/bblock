@@ -573,13 +573,13 @@ impl<'a, A: BStackAllocator> Ord for BXorBlockWriter<'a, A> {
     }
 }
 
-impl<'a, A: BStackSliceAllocator> PartialEq<BXorBlockReader<'a, A>> for BXorBlockWriter<'a, A> {
+impl<'a, A: BStackAllocator> PartialEq<BXorBlockReader<'a, A>> for BXorBlockWriter<'a, A> {
     fn eq(&self, other: &BXorBlockReader<'a, A>) -> bool {
         other == self
     }
 }
 
-impl<'a, A: BStackSliceAllocator> PartialOrd<BXorBlockReader<'a, A>> for BXorBlockWriter<'a, A> {
+impl<'a, A: BStackAllocator> PartialOrd<BXorBlockReader<'a, A>> for BXorBlockWriter<'a, A> {
     fn partial_cmp(&self, other: &BXorBlockReader<'a, A>) -> Option<Ordering> {
         other.partial_cmp(self).map(|o| o.reverse())
     }
