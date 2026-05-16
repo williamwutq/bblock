@@ -9,6 +9,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- **Allocator composability** — `BBlockAllocator` and `BXorBlockAllocator` can
+  now be stacked inside each other. The inner allocator constraint is relaxed
+  from `BStackSliceAllocator` to `BStackAllocator` with two crate-internal
+  helper traits (`BStackRawAllocator`, `BlockStart`).
+
+
 ---
 
 ## [0.2.0] - 2026-05-15
