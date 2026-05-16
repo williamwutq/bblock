@@ -10,12 +10,7 @@ This document outlines upcoming features planned for the `bblock` crate. These e
 
 ### Motivation
 
-Many use cases for persistent checksummed blocks involve compressible data (logs, JSON, text, serialized structures). Compression provides:
-
-- **Reduced disk space usage** — smaller storage footprint for the same logical data
-- **Lower I/O bandwidth** — less data written to and read from disk
-- **Better cache efficiency** — more logical blocks fit in memory
-- **Cost savings** — particularly important for cloud storage
+There are many use cases for persistent checksummed blocks involve compressible data (logs, JSON, text, serialized structures).
 
 While users can compress data before passing it to `bblock`, doing so manually has drawbacks:
 - Checksumming operates on compressed bytes, making corruption detection less meaningful
@@ -77,24 +72,6 @@ Compressed blocks require variable-size storage. Two approaches:
 
 **Recommendation:** Start with Option A for simplicity and non-breaking compatibility.
 
-#### Interaction with checksumming
-
-Compress **then** checksum:
-
-```
-original_data -> compress -> compressed_data -> compute_checksum(compressed_data)
-```
-
-Benefits:
-- Checksum validates the compressed data actually stored on disk
-- Detects corruption in compressed stream (which decompression will reject)
-- Smaller checksum computation (operates on compressed data)
-
-When reading:
-```
-validate_checksum(compressed_data) -> decompress -> original_data
-```
-
 #### API design
 
 Mirror existing patterns with transparent compression/decompression:
@@ -137,18 +114,6 @@ pub enum CompressionStrategy {
 
 If compression doesn't meet threshold, store uncompressed data with a flag in metadata.
 
-#### Composability considerations
-
-Current limitation: `BBlockAllocator` cannot wrap another `BBlockAllocator` because each requires the inner allocator to be a `BStackSliceAllocator`.
-
-For compression + checksumming, consider:
-
-1. **Built-in checksumming** — `BCompressedBlock` always includes checksum (recommended)
-2. **Layering** — resolve the composability limitation to enable `BBlockAllocator<BCompressedBlockAllocator<A>>`
-3. **Unified type** — `BCompressedBlockAllocator` with checksum strategy parameter (CRC32/XOR)
-
-Recommendation: Option 1 for simplicity. Compressed blocks should always be checksummed.
-
 #### Performance considerations
 
 - **Write path:** Compression overhead (CPU) vs. reduced I/O (disk)
@@ -158,14 +123,12 @@ Recommendation: Option 1 for simplicity. Compressed blocks should always be chec
 
 Consider async variants for large blocks to avoid blocking on compression/decompression.
 
-#### Migration path
+## Open Questions
 
-For non-breaking compatibility:
-
-1. Add as new module, don't modify existing types
-2. Use feature flags for compression algorithm dependencies
-3. Provide conversion utilities to migrate uncompressed blocks to compressed format
-4. Document performance characteristics and use case recommendations
+- What algorithms to support initially?
+- How should compression interact with checksumming? Should the user explicitly compose checksummed and compressed allocators, or should compression include its own integrity checks?
+- Should there be dynamic resizing of compressed blocks, or should we stick to fixed-size allocations with overhead for simplicity? If fixed, should there be pre-allocation of maximum compressed size and allow for unused space?
+- Should compression stats be exposed in the API for monitoring and optimization purposes?
 
 ---
 
@@ -190,6 +153,145 @@ After this change:
 let xor_crc_alloc = BXorBlockAllocator::new(BBlockAllocator::new(linear_alloc));
 let crc_compressed_alloc = BBlockAllocator::new(BCompressedBlockAllocator::new(linear_alloc));
 ```
+
+---
+
+## Encrypted Blocks
+
+**Breaking change:** No
+
+### Motivation
+
+Persistent data often requires encryption at rest for security and compliance.
+
+While users can encrypt data before passing it to `bblock`, this has the same drawbacks as manual compression: checksums operate on ciphertext, sub-range views don't work on plaintext, and key management becomes application-specific boilerplate. Built-in transparent encryption maintains `bblock`'s ergonomic API while providing authenticated encryption automatically.
+
+### Design
+
+#### Module structure
+
+Add an `encrypted` module following the existing pattern:
+
+```rust
+pub mod encrypted {
+    pub struct BEncryptedBlockAllocator<A, C> { ... }
+    pub struct BEncryptedBlock<'a, A, C> { ... }
+    pub struct BEncryptedBlockView<'a, A, C> { ... }
+    // Reader/Writer types
+}
+```
+
+#### Encryption algorithms
+
+Support authenticated encryption algorithms via type parameters or feature flags:
+
+- **AES-256-GCM** — industry standard, hardware-accelerated on modern CPUs
+- **ChaCha20-Poly1305** — faster on platforms without AES-NI, constant-time
+- **XChaCha20-Poly1305** — extended nonce variant, better for random nonces
+
+Dependencies: `aes-gcm`, `chacha20poly1305` as optional features via the `aead` crate.
+
+Authenticated encryption is mandatory—no unauthenticated modes. The authentication tag replaces or supplements checksums (see below).
+
+#### Storage format
+
+Encrypted blocks need space for ciphertext, nonce/IV, and authentication tag:
+
+```
+[nonce] [ciphertext: len bytes] [auth_tag]
+```
+
+- Nonce generated randomly per write (96-bit for GCM, 192-bit for XChaCha20)
+- Ciphertext is same size as plaintext (stream ciphers)
+- Authentication tag validates both ciphertext and nonce (AEAD property)
+- Total overhead: 28 bytes for AES-GCM/ChaCha20, 40 bytes for XChaCha20
+
+Allocate `plaintext_len + nonce_len + tag_len` bytes from underlying allocator.
+
+#### Key management
+
+Support multiple key sources:
+
+```rust
+pub enum KeySource {
+    Static([u8; 32]),           // Direct 256-bit key
+    Derived { password: String, salt: [u8; 16] }, // PBKDF2/Argon2
+    Callback(Box<dyn Fn() -> [u8; 32]>),  // External KMS/keyring
+}
+
+let alloc = BEncryptedBlockAllocator::new(inner_alloc, Algorithm::Aes256Gcm, key_source);
+```
+
+Key rotation considerations: blocks encrypted with old keys cannot be read with new keys. Provide utilities for re-encryption or support key IDs in block metadata (adds 4 bytes overhead).
+
+#### Interaction with checksumming
+
+Authenticated encryption **replaces** checksums for encrypted blocks. The authentication tag provides stronger integrity guarantees than CRC32/XOR:
+
+```
+plaintext -> encrypt_and_authenticate -> [nonce || ciphertext || tag]
+```
+
+AEAD algorithms guarantee that tampering with any byte (nonce, ciphertext, or tag) will be detected during decryption. Adding an additional checksum layer is redundant and wasteful.
+
+However, for composability with compression:
+```rust
+// Compress then encrypt (recommended for space efficiency)
+BEncryptedBlockAllocator::new(
+    BCompressedBlockAllocator::new(linear_alloc),
+    Algorithm::Aes256Gcm,
+    key_source
+)
+```
+
+The compression layer's checksum becomes redundant once encrypted, but removing it would require special-casing. Accept the minor overhead for simplicity.
+
+#### API design
+
+Mirror existing patterns with transparent encryption/decryption:
+
+```rust
+use bblock::encrypted::{BEncryptedBlockAllocator, Algorithm, KeySource};
+
+let key_source = KeySource::Static([0u8; 32]); // Use proper key in production
+let alloc = BEncryptedBlockAllocator::new(inner_alloc, Algorithm::Aes256Gcm, key_source);
+
+let block = alloc.alloc(1024)?; // allocates 1024 + 28 bytes
+
+// Writes encrypt automatically
+block.view().write(b"sensitive data")?;
+
+// Reads decrypt and authenticate automatically  
+let mut buf = vec![0; 1024];
+block.view().read(&mut buf)?; // Fails if tampered
+
+// Verification checks authentication tag
+assert!(block.verify()?);
+```
+
+#### Performance considerations
+
+- **Write path:** Encryption overhead typically 1-5 GB/s (depends on algorithm, CPU)
+- **Read path:** Decryption overhead similar to encryption
+- **Memory:** Minimal additional buffering (AEAD is single-pass)
+- **Hardware acceleration:** AES-GCM benefits from AES-NI instructions (~10x faster)
+
+For large blocks, encryption overhead is usually less than disk I/O latency. Consider async variants for very large blocks.
+
+#### Security considerations
+
+- **Nonce uniqueness:** Critical for GCM security. Use random generation or counter-based with careful state management.
+- **Key security:** Keys in memory are vulnerable to memory dumps.
+- **Side channels:** Constant-time implementations are necessary. Rely on audited crates like `aes-gcm` and `chacha20poly1305`.
+- **Authentication required:** Never expose unauthenticated ciphertext to application code.
+
+## Open Questions
+
+- What algorithms to support initially?
+- Should we support separate metadata for key IDs to enable key rotation without re-encryption?
+- How to handle nonce management for users who want deterministic encryption (e.g., for deduplication)? This is generally not recommended but may be a use case.
+- Should we provide utilities for re-encrypting existing blocks when keys are rotated?
+- What is the relationship between encryption and compression layers? Should the user be able to explicitly compose them, or should we provide a combination allocator that does both?
 
 ---
 
