@@ -9,13 +9,63 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+---
+
+## [0.2.0] - 2026-05-15
+
 ### Added
 
-- XOR checksum module (`xor`) — provides XOR-based checksummed blocks with
-  incremental checksum updates for improved write performance. Includes
-  `BXorBlockAllocator<A>`, `BXorBlock<'a, A>`, `BXorBlockView<'a, A>`,
-  `BXorBlockReader<'a, A>`, and `BXorBlockWriter<'a, A>` types, mirroring the
-  CRC32 API but with weaker integrity guarantees in exchange for faster writes.
+- **XOR checksum module** (`xor`) — XOR-based checksummed blocks with
+  incremental checksum updates for improved write performance.
+  - `BXorBlockAllocator<A>` — wraps any `A: BStackAllocator`; appends a
+    4-byte XOR checksum to every allocation.
+  - `BXorBlock<'a, A>` — `Copy + Clone` handle with layout
+    `[data: len bytes][xor: 4 bytes LE]`. Provides `verify`, `checksum`,
+    `view`, `reader`, `reader_at`, `writer`, `writer_at`, `to_bytes`,
+    `from_bytes`, and the unsafe escape hatch `into_slice`.
+  - `BXorBlockView<'a, A>` — read/write window with `subview` support; all
+    writes update the checksum **incrementally** (only the changed bytes are
+    re-read, not the full block).
+  - `BXorBlockReader<'a, A>` — cursor-based `io::Read + io::Seek`.
+  - `BXorBlockWriter<'a, A>` — cursor-based `io::Write + io::Seek`; updates
+    the XOR checksum incrementally after every write.
+  - `xor::CHECKSUM_LENGTH: u64 = 4`.
+  - XOR types re-exported at the crate root alongside the CRC32 types.
+- **`BStackAllocator` impls** — both `BBlockAllocator<A>` and
+  `BXorBlockAllocator<A>` now implement `bstack::BStackAllocator` with
+  `Allocated<'_>` set to the corresponding block type. This makes the
+  allocator wrappers composable: one can be used as the inner allocator of
+  another (e.g. `BXorBlockAllocator<BBlockAllocator<A>>`).
+- **`TryInto<BStackSlice>` impls** — `BBlock` and `BXorBlock` implement
+  `TryInto<BStackSlice<'_, Self::Allocator>>` to satisfy the
+  `BStackAllocator::Allocated` bound. Both conversions are infallible.
+- **`BStackGuardedSlice` impls** (requires bstack `guarded` feature) —
+  `BBlock` and `BXorBlock` implement `bstack::BStackGuardedSlice`:
+  - `as_slice()` returns the data region only; the checksum trailer is hidden.
+  - `write()` writes data and recomputes the checksum. `BBlock` does a full
+    CRC32 recompute; `BXorBlock` applies an incremental XOR delta.
+  - `zero()` zeroes the data region and updates the checksum accordingly.
+
+### Changed
+
+- **Dependency: bstack `0.1` → `0.2`** *(semver-breaking — forces downstream
+  crates using bstack directly to also upgrade to `0.2`)*. bblock's own API
+  surface has no breaking changes in this release; all modifications below are
+  backward-compatible relaxations or additions.
+- **Allocator bounds relaxed** — `BBlock`, `BBlockView`, `BBlockReader`,
+  `BBlockWriter`, and their XOR counterparts now accept any
+  `A: BStackAllocator` rather than the stricter `A: BStackSliceAllocator`.
+  All existing code continues to compile unchanged.
+- `Copy` and `Clone` for `BBlock`, `BBlockView`, `BXorBlock`, and
+  `BXorBlockView` are now implemented manually (without `#[derive]`) so that
+  the impls do not impose spurious `A: Copy + Clone` bounds on the inner
+  allocator type. All existing code continues to compile unchanged.
+
+### Dependencies
+
+- [`bstack`](https://crates.io/crates/bstack) updated to `0.2` with
+  `features = ["alloc", "set", "guarded"]`
+- [`crc32fast`](https://crates.io/crates/crc32fast) `1.5` (unchanged)
 
 ---
 
