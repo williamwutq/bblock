@@ -31,7 +31,10 @@
 //! XOR checksum unchanged. Use [`crate::crc`] when detection strength matters
 //! more than write throughput.
 
-use bstack::{BStackSlice, BStackSliceAllocator, BStackSliceReader, BStackSliceWriter};
+use bstack::{
+    BStack, BStackAllocator, BStackGuardedSlice, BStackSlice, BStackSliceAllocator,
+    BStackSliceReader, BStackSliceWriter,
+};
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -108,13 +111,21 @@ impl<A: BStackSliceAllocator> BXorBlockAllocator<A> {
 /// **Backing layout:** `[data: len bytes][xor: 4 bytes LE]`
 ///
 /// `BXorBlock` is `Copy`: every copy refers to the same physical region.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct BXorBlock<'a, A: BStackSliceAllocator> {
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BXorBlock<'a, A: BStackAllocator> {
     slice: BStackSlice<'a, A>,
     len: u64,
 }
 
-impl<'a, A: BStackSliceAllocator> BXorBlock<'a, A> {
+impl<'a, A: BStackAllocator> Copy for BXorBlock<'a, A> {}
+
+impl<'a, A: BStackAllocator> Clone for BXorBlock<'a, A> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'a, A: BStackAllocator> BXorBlock<'a, A> {
     /// Number of usable (non-checksum) bytes in this block.
     pub fn len(&self) -> u64 {
         self.len
@@ -230,7 +241,7 @@ impl<'a, A: BStackSliceAllocator> BXorBlock<'a, A> {
     }
 }
 
-impl<'a, A: BStackSliceAllocator> From<BXorBlock<'a, A>> for [u8; 16] {
+impl<'a, A: BStackAllocator> From<BXorBlock<'a, A>> for [u8; 16] {
     fn from(block: BXorBlock<'a, A>) -> [u8; 16] {
         block.to_bytes()
     }
@@ -243,15 +254,23 @@ impl<'a, A: BStackSliceAllocator> From<BXorBlock<'a, A>> for [u8; 16] {
 ///
 /// Like [`crate::crc::BBlockView`], all writes and `verify()` operate on the
 /// **full block checksum**, even through a narrow sub-view.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct BXorBlockView<'a, A: BStackSliceAllocator> {
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BXorBlockView<'a, A: BStackAllocator> {
     slice: BStackSlice<'a, A>,
     full_len: u64,
     start: u64,
     end: u64,
 }
 
-impl<'a, A: BStackSliceAllocator> BXorBlockView<'a, A> {
+impl<'a, A: BStackAllocator> Copy for BXorBlockView<'a, A> {}
+
+impl<'a, A: BStackAllocator> Clone for BXorBlockView<'a, A> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'a, A: BStackAllocator> BXorBlockView<'a, A> {
     /// Create a full-block view from an existing [`BXorBlock`].
     pub fn new(block: &BXorBlock<'a, A>) -> Self {
         Self {
@@ -433,11 +452,11 @@ impl<'a, A: BStackSliceAllocator> BXorBlockView<'a, A> {
 /// [`BXorBlock::reader`], [`BXorBlock::reader_at`], [`BXorBlockView::reader`],
 /// or [`BXorBlockView::reader_at`].
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct BXorBlockReader<'a, A: BStackSliceAllocator> {
+pub struct BXorBlockReader<'a, A: BStackAllocator> {
     inner: BStackSliceReader<'a, A>,
 }
 
-impl<'a, A: BStackSliceAllocator> fmt::Debug for BXorBlockReader<'a, A> {
+impl<'a, A: BStackAllocator> fmt::Debug for BXorBlockReader<'a, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BXorBlockReader")
             .field("start", &self.inner.slice().start())
@@ -448,20 +467,20 @@ impl<'a, A: BStackSliceAllocator> fmt::Debug for BXorBlockReader<'a, A> {
     }
 }
 
-impl<'a, A: BStackSliceAllocator> BXorBlockReader<'a, A> {
+impl<'a, A: BStackAllocator> BXorBlockReader<'a, A> {
     /// Return the current cursor position within the view's coordinate space.
     pub fn position(&self) -> u64 {
         self.inner.position()
     }
 }
 
-impl<'a, A: BStackSliceAllocator> PartialEq<BXorBlockWriter<'a, A>> for BXorBlockReader<'a, A> {
+impl<'a, A: BStackAllocator> PartialEq<BXorBlockWriter<'a, A>> for BXorBlockReader<'a, A> {
     fn eq(&self, other: &BXorBlockWriter<'a, A>) -> bool {
         self.inner.slice() == other.inner.slice() && self.inner.position() == other.inner.position()
     }
 }
 
-impl<'a, A: BStackSliceAllocator> PartialOrd<BXorBlockWriter<'a, A>> for BXorBlockReader<'a, A> {
+impl<'a, A: BStackAllocator> PartialOrd<BXorBlockWriter<'a, A>> for BXorBlockReader<'a, A> {
     fn partial_cmp(&self, other: &BXorBlockWriter<'a, A>) -> Option<Ordering> {
         let self_pos = self.inner.slice().start() + self.inner.position();
         let other_pos = other.inner.slice().start() + other.inner.position();
@@ -473,13 +492,13 @@ impl<'a, A: BStackSliceAllocator> PartialOrd<BXorBlockWriter<'a, A>> for BXorBlo
     }
 }
 
-impl<'a, A: BStackSliceAllocator> io::Read for BXorBlockReader<'a, A> {
+impl<'a, A: BStackAllocator> io::Read for BXorBlockReader<'a, A> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.inner.read(buf)
     }
 }
 
-impl<'a, A: BStackSliceAllocator> io::Seek for BXorBlockReader<'a, A> {
+impl<'a, A: BStackAllocator> io::Seek for BXorBlockReader<'a, A> {
     fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
         self.inner.seek(pos)
     }
@@ -493,14 +512,14 @@ impl<'a, A: BStackSliceAllocator> io::Seek for BXorBlockReader<'a, A> {
 /// [`BXorBlock::writer_at`], [`BXorBlockView::writer`], or
 /// [`BXorBlockView::writer_at`].
 #[derive(Clone)]
-pub struct BXorBlockWriter<'a, A: BStackSliceAllocator> {
+pub struct BXorBlockWriter<'a, A: BStackAllocator> {
     inner: BStackSliceWriter<'a, A>,
     /// Full block data region — needed to compute view-relative block offsets.
     full_data: BStackSlice<'a, A>,
     checksum: BStackSlice<'a, A>,
 }
 
-impl<'a, A: BStackSliceAllocator> fmt::Debug for BXorBlockWriter<'a, A> {
+impl<'a, A: BStackAllocator> fmt::Debug for BXorBlockWriter<'a, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BXorBlockWriter")
             .field("start", &self.inner.slice().start())
@@ -511,35 +530,35 @@ impl<'a, A: BStackSliceAllocator> fmt::Debug for BXorBlockWriter<'a, A> {
     }
 }
 
-impl<'a, A: BStackSliceAllocator> BXorBlockWriter<'a, A> {
+impl<'a, A: BStackAllocator> BXorBlockWriter<'a, A> {
     /// Return the current cursor position within the view's coordinate space.
     pub fn position(&self) -> u64 {
         self.inner.position()
     }
 }
 
-impl<'a, A: BStackSliceAllocator> PartialEq for BXorBlockWriter<'a, A> {
+impl<'a, A: BStackAllocator> PartialEq for BXorBlockWriter<'a, A> {
     fn eq(&self, other: &Self) -> bool {
         self.inner.slice() == other.inner.slice() && self.inner.position() == other.inner.position()
     }
 }
 
-impl<'a, A: BStackSliceAllocator> Eq for BXorBlockWriter<'a, A> {}
+impl<'a, A: BStackAllocator> Eq for BXorBlockWriter<'a, A> {}
 
-impl<'a, A: BStackSliceAllocator> Hash for BXorBlockWriter<'a, A> {
+impl<'a, A: BStackAllocator> Hash for BXorBlockWriter<'a, A> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.inner.slice().hash(state);
         self.inner.position().hash(state);
     }
 }
 
-impl<'a, A: BStackSliceAllocator> PartialOrd for BXorBlockWriter<'a, A> {
+impl<'a, A: BStackAllocator> PartialOrd for BXorBlockWriter<'a, A> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<'a, A: BStackSliceAllocator> Ord for BXorBlockWriter<'a, A> {
+impl<'a, A: BStackAllocator> Ord for BXorBlockWriter<'a, A> {
     fn cmp(&self, other: &Self) -> Ordering {
         let self_pos = self.inner.slice().start() + self.inner.position();
         let other_pos = other.inner.slice().start() + other.inner.position();
@@ -561,7 +580,7 @@ impl<'a, A: BStackSliceAllocator> PartialOrd<BXorBlockReader<'a, A>> for BXorBlo
     }
 }
 
-impl<'a, A: BStackSliceAllocator> io::Write for BXorBlockWriter<'a, A> {
+impl<'a, A: BStackAllocator> io::Write for BXorBlockWriter<'a, A> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         // Block-relative offset of the current write position.
         let block_offset =
@@ -598,9 +617,108 @@ impl<'a, A: BStackSliceAllocator> io::Write for BXorBlockWriter<'a, A> {
     }
 }
 
-impl<'a, A: BStackSliceAllocator> io::Seek for BXorBlockWriter<'a, A> {
+impl<'a, A: BStackAllocator> io::Seek for BXorBlockWriter<'a, A> {
     fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
         self.inner.seek(pos)
+    }
+}
+
+impl<A: BStackSliceAllocator> BStackAllocator for BXorBlockAllocator<A> {
+    type Error = io::Error;
+    type Allocated<'a>
+        = BXorBlock<'a, BXorBlockAllocator<A>>
+    where
+        A: 'a;
+
+    fn stack(&self) -> &BStack {
+        self.inner.stack()
+    }
+
+    fn into_stack(self) -> BStack {
+        self.inner.into_stack()
+    }
+
+    fn alloc(&self, len: u64) -> io::Result<BXorBlock<'_, BXorBlockAllocator<A>>> {
+        let inner = self.inner.alloc(len + CHECKSUM_LENGTH)?;
+        let offset = inner.start();
+        let slice = unsafe { BStackSlice::from_raw_parts(self, offset, len + CHECKSUM_LENGTH) };
+        Ok(BXorBlock { slice, len })
+    }
+
+    fn realloc<'a>(
+        &'a self,
+        block: BXorBlock<'a, BXorBlockAllocator<A>>,
+        new_len: u64,
+    ) -> io::Result<BXorBlock<'a, BXorBlockAllocator<A>>> {
+        let offset = block.slice.start();
+        let inner_old = unsafe {
+            BStackSlice::from_raw_parts(&self.inner, offset, block.len + CHECKSUM_LENGTH)
+        };
+        let inner_new = self.inner.realloc(inner_old, new_len + CHECKSUM_LENGTH)?;
+        let new_offset = inner_new.start();
+        let slice =
+            unsafe { BStackSlice::from_raw_parts(self, new_offset, new_len + CHECKSUM_LENGTH) };
+        Ok(BXorBlock {
+            slice,
+            len: new_len,
+        })
+    }
+
+    fn dealloc(&self, block: BXorBlock<'_, BXorBlockAllocator<A>>) -> io::Result<()> {
+        let offset = block.slice.start();
+        let inner = unsafe {
+            BStackSlice::from_raw_parts(&self.inner, offset, block.len + CHECKSUM_LENGTH)
+        };
+        self.inner.dealloc(inner)
+    }
+}
+
+impl<'a, A: BStackSliceAllocator> TryInto<BStackSlice<'a, BXorBlockAllocator<A>>>
+    for BXorBlock<'a, BXorBlockAllocator<A>>
+{
+    type Error = std::convert::Infallible;
+
+    fn try_into(self) -> Result<BStackSlice<'a, BXorBlockAllocator<A>>, Self::Error> {
+        Ok(self.slice)
+    }
+}
+
+impl<'a, A: BStackAllocator + 'a> BStackGuardedSlice<'a, A> for BXorBlock<'a, A> {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    unsafe fn raw_block(&self) -> BStackSlice<'a, A> {
+        self.slice
+    }
+
+    fn as_slice(&self) -> io::Result<BStackSlice<'a, A>> {
+        Ok(unsafe { self.data_slice() })
+    }
+
+    fn write(&self, data: impl AsRef<[u8]>) -> io::Result<()> {
+        let data = data.as_ref();
+        let n = (data.len() as u64).min(self.len) as usize;
+        let mut old = vec![0u8; n];
+        unsafe { self.data_slice() }.read_range_into(0, &mut old)?;
+        unsafe { self.data_slice() }.write(data)?;
+        let mut cs = [0u8; 4];
+        unsafe { self.checksum_slice() }.read_into(&mut cs)?;
+        for i in 0..n {
+            cs[i % 4] ^= old[i] ^ data[i];
+        }
+        unsafe { self.checksum_slice() }.write(cs)
+    }
+
+    fn zero(&self) -> io::Result<()> {
+        let old = unsafe { self.data_slice() }.read()?;
+        unsafe { self.data_slice() }.zero()?;
+        let mut cs = [0u8; 4];
+        unsafe { self.checksum_slice() }.read_into(&mut cs)?;
+        for (i, &b) in old.iter().enumerate() {
+            cs[i % 4] ^= b;
+        }
+        unsafe { self.checksum_slice() }.write(cs)
     }
 }
 

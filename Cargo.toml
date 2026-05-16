@@ -1,6 +1,6 @@
 [package]
 name = "bblock"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["William Wu <williamwutq@gmail.com>", "Claude <claude@anthropic.com>"]
 license = "MIT"
@@ -12,7 +12,7 @@ documentation = "https://docs.rs/bblock"
 keywords = ["checksum", "persistent", "file-backed", "database", "binary"]
 
 [dependencies]
-bstack = { version = "0.2", features = ["alloc", "set"] }
+bstack = { version = "0.2", features = ["alloc", "set", "guarded"] }
 crc32fast = "1.5"
 
 [dev-dependencies]
