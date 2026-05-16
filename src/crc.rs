@@ -132,31 +132,6 @@ impl<A: BStackSliceAllocator> BBlockAllocator<A> {
     pub fn into_inner(self) -> A {
         self.inner
     }
-
-    /// Allocate `len` usable bytes plus a 4-byte checksum trailer.
-    ///
-    /// The returned [`BBlock`] has `len()` equal to `len`. The backing
-    /// allocation is `len + 4` bytes.
-    pub fn alloc(&self, len: u64) -> io::Result<BBlock<'_, A>> {
-        let slice = self.inner.alloc(len + CHECKSUM_LENGTH)?;
-        Ok(BBlock { slice, len })
-    }
-
-    /// Resize an existing block to `new_len` usable bytes.
-    ///
-    /// The backing allocation becomes `new_len + 4` bytes.
-    pub fn realloc<'a>(&'a self, block: BBlock<'a, A>, new_len: u64) -> io::Result<BBlock<'a, A>> {
-        let slice = self.inner.realloc(block.slice, new_len + CHECKSUM_LENGTH)?;
-        Ok(BBlock {
-            slice,
-            len: new_len,
-        })
-    }
-
-    /// Deallocate a block, releasing its backing storage.
-    pub fn dealloc(&self, block: BBlock<'_, A>) -> io::Result<()> {
-        self.inner.dealloc(block.slice)
-    }
 }
 
 /// A handle to a checksummed block allocated by a [`BBlockAllocator`].

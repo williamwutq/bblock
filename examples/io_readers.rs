@@ -1,5 +1,5 @@
 use bblock::BBlockAllocator;
-use bstack::{BStack, LinearBStackAllocator};
+use bstack::{BStack, BStackAllocator, LinearBStackAllocator};
 use std::io::{Read, Seek, SeekFrom, Write};
 
 fn main() -> std::io::Result<()> {

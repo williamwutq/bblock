@@ -101,30 +101,6 @@ impl<A: BStackSliceAllocator> BXorBlockAllocator<A> {
     pub fn into_inner(self) -> A {
         self.inner
     }
-
-    /// Allocate `len` usable bytes plus a 4-byte checksum trailer.
-    pub fn alloc(&self, len: u64) -> io::Result<BXorBlock<'_, A>> {
-        let slice = self.inner.alloc(len + CHECKSUM_LENGTH)?;
-        Ok(BXorBlock { slice, len })
-    }
-
-    /// Resize an existing block to `new_len` usable bytes.
-    pub fn realloc<'a>(
-        &'a self,
-        block: BXorBlock<'a, A>,
-        new_len: u64,
-    ) -> io::Result<BXorBlock<'a, A>> {
-        let slice = self.inner.realloc(block.slice, new_len + CHECKSUM_LENGTH)?;
-        Ok(BXorBlock {
-            slice,
-            len: new_len,
-        })
-    }
-
-    /// Deallocate a block, releasing its backing storage.
-    pub fn dealloc(&self, block: BXorBlock<'_, A>) -> io::Result<()> {
-        self.inner.dealloc(block.slice)
-    }
 }
 
 /// A handle to an XOR-checksummed block allocated by a [`BXorBlockAllocator`].
