@@ -10,6 +10,7 @@ changelog = "CHANGELOG.md"
 repository = "https://github.com/williamwutq/bblock"
 documentation = "https://docs.rs/bblock"
 keywords = ["checksum", "persistent", "file-backed", "database", "binary"]
+include = ["src/**/*", "Cargo.toml", "README.md", "CHANGELOG.md", "LICENSE", "examples/**/*.rs", ".gitignore"]
 
 [dependencies]
 bstack = { version = "0.2", features = ["alloc", "set", "guarded"] }
