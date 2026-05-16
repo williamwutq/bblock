@@ -25,9 +25,9 @@ checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 
 [[package]]
 name = "bstack"
-version = "0.1.6"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78460a95c3508e31d6a5191f2fecceca00ff8e2f2851542523bf66bc9635f7b0"
+checksum = "48928dad5b1a6f2c010d35ff2d3d37dac27dcb5d03ef461df8723913e3fc07e3"
 dependencies = [
  "libc",
  "windows-sys",
