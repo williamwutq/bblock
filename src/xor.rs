@@ -141,28 +141,6 @@ impl<'a, A: BStackAllocator> BXorBlock<'a, A> {
         self.len == 0
     }
 
-    /// Serialize this block reference as a 16-byte array.
-    ///
-    /// The format is `[offset: u64 LE | usable_len: u64 LE]`. Reconstruct
-    /// with [`BXorBlock::from_bytes`].
-    pub fn to_bytes(&self) -> [u8; 16] {
-        let mut out = [0u8; 16];
-        out[..8].copy_from_slice(&self.slice.start().to_le_bytes());
-        out[8..].copy_from_slice(&self.len.to_le_bytes());
-        out
-    }
-
-    /// Reconstruct a block reference from a 16-byte array produced by
-    /// [`BXorBlock::to_bytes`].
-    pub fn from_bytes(allocator: &'a A, bytes: [u8; 16]) -> Self {
-        let offset = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-        let len = u64::from_le_bytes(bytes[8..].try_into().unwrap());
-        BXorBlock {
-            slice: unsafe { BStackSlice::from_raw_parts(allocator, offset, len + CHECKSUM_LENGTH) },
-            len,
-        }
-    }
-
     /// Read the stored XOR checksum from the backing store.
     pub fn checksum(&self) -> io::Result<u32> {
         let mut buf = [0u8; 4];
@@ -243,12 +221,6 @@ impl<'a, A: BStackAllocator> BXorBlock<'a, A> {
 
     unsafe fn checksum_slice(&self) -> BStackSlice<'a, A> {
         self.slice.subslice(self.len, self.len + CHECKSUM_LENGTH)
-    }
-}
-
-impl<'a, A: BStackAllocator> From<BXorBlock<'a, A>> for [u8; 16] {
-    fn from(block: BXorBlock<'a, A>) -> [u8; 16] {
-        block.to_bytes()
     }
 }
 
@@ -834,18 +806,6 @@ mod tests {
         assert!(block.verify().unwrap());
         let data = block.view().read().unwrap();
         assert_eq!(data, b"ab\x00\x00\x00\x00gh");
-    }
-
-    #[test]
-    fn test_to_from_bytes() {
-        let (alloc, _f) = make_allocator();
-        let block = alloc.alloc(8).unwrap();
-        block.view().write(&b"rustacean"[..8]).unwrap();
-        let bytes: [u8; 16] = block.into();
-        let block2 = BXorBlock::from_bytes(alloc.inner(), bytes);
-        assert_eq!(block2.len(), 8);
-        assert!(block2.verify().unwrap());
-        assert_eq!(block2.view().read().unwrap(), &b"rustacean"[..8]);
     }
 
     #[test]
