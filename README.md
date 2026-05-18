@@ -163,10 +163,14 @@ crate's `Cargo.toml`), all four concrete types implement
 | `BXorBlockWriter<'a, A>` | `io::Write + io::Seek`; updates XOR checksum incrementally           |
 | `xor::CHECKSUM_LENGTH`   | `4` — the XOR checksum trailer size in bytes                         |
 
-### `BBlock<'a, A>`
+Both CRC and XOR block types expose the same API shape. Substitute `BXorBlock` /
+`BXorBlockView` / `BXorBlockReader` / `BXorBlockWriter` for the CRC32 variants.
+The only behavioural difference is that XOR checksum updates are incremental.
+
+### `BBlock<'a, A>` / `BXorBlock<'a, A>`
 
 ```rust
-impl<'a, A: BStackAllocator> BBlock<'a, A> {
+impl<'a, A: BStackAllocator> BBlock<'a, A> {       // same for BXorBlock
     // Serialisation
     pub fn to_bytes(&self) -> [u8; 16];
     pub fn from_bytes(allocator: &'a A, bytes: [u8; 16]) -> Self;
@@ -197,10 +201,10 @@ impl<'a, A: BStackAllocator> BStackGuardedSlice<'a, A> for BBlock<'a, A> {
 }
 ```
 
-### `BBlockView<'a, A>`
+### `BBlockView<'a, A>` / `BXorBlockView<'a, A>`
 
 ```rust
-impl<'a, A: BStackAllocator> BBlockView<'a, A> {
+impl<'a, A: BStackAllocator> BBlockView<'a, A> {   // same for BXorBlockView
     pub fn new(block: &BBlock<'a, A>) -> Self;
 
     // Sub-range — coordinates are relative to this view's start
@@ -237,6 +241,7 @@ impl<'a, A: BStackAllocator> BStackGuardedSlice<'a, A> for BBlockView<'a, A> {
 
 // requires `use bstack::BStackGuardedSliceSubview`
 impl<'a, A: BStackAllocator> BStackGuardedSliceSubview<'a, A> for BBlockView<'a, A> {
+    fn subview(&self, start: u64, end: u64) -> impl BStackGuardedSliceSubview<'a, A>;
     fn subview_range(&self, range: Range<u64>) -> impl BStackGuardedSliceSubview<'a, A>;
 }
 ```
