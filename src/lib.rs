@@ -36,13 +36,18 @@
 //! # bstack `guarded` feature
 //!
 //! When bstack is built with the `guarded` feature (enabled by default in this
-//! crate), both [`BBlock`] and [`BXorBlock`] implement
-//! [`bstack::BStackGuardedSlice`]. This lets them be used as guarded regions
-//! with bstack's generic guarded-I/O infrastructure:
+//! crate), all four concrete types implement [`bstack::BStackGuardedSlice`]:
+//! [`BBlock`], [`BBlockView`], [`BXorBlock`], and [`BXorBlockView`]. The view
+//! types additionally implement [`bstack::BStackGuardedSliceSubview`].
 //!
-//! * `as_slice()` returns the data region only (the checksum trailer is hidden).
+//! * `as_slice()` returns the data region only (the checksum trailer is hidden;
+//!   for views, only the view's sub-range is exposed).
 //! * `write()` and `zero()` automatically keep the checksum consistent.
-//!   `BBlock` recomputes the full CRC32; `BXorBlock` updates incrementally.
+//!   `BBlock`/`BBlockView` recompute the full CRC32; `BXorBlock`/`BXorBlockView`
+//!   update incrementally.
+//! * `len()`, `is_empty()` (block types) and `len()`, `is_empty()`, `read()`,
+//!   `write()`, `zero()` (view types) are provided by the trait — callers must
+//!   `use bstack::BStackGuardedSlice`.
 //!
 //! # Detection, not recovery
 //!

@@ -44,7 +44,7 @@ bstack = { version = "0.2", features = ["alloc", "set", "guarded"] }
 ```
 
 ```rust,no_run
-use bstack::{BStack, LinearBStackAllocator};
+use bstack::{BStack, BStackGuardedSlice, LinearBStackAllocator};
 use bblock::BBlockAllocator;
 
 // Open (or create) a bstack file and wrap the allocator.
@@ -76,7 +76,7 @@ assert!(block.verify().unwrap());
 XOR types are available at the crate root and in the `xor` module.
 
 ```rust,no_run
-use bstack::{BStack, LinearBStackAllocator};
+use bstack::{BStack, BStackGuardedSlice, LinearBStackAllocator};
 use bblock::BXorBlockAllocator;
 
 // Open (or create) a bstack file and wrap the allocator.
@@ -108,25 +108,36 @@ assert!(block.verify().unwrap());
 Both allocator wrappers implement `BStackAllocator` themselves, so they can be
 passed to any generic API that accepts `T: BStackAllocator`. This is what
 allows `BBlock` and `BXorBlock` to implement `BStackGuardedSlice` without
-requiring the stricter `BStackSliceAllocator` bound.
+requiring the stricter `BStackSliceAllocator` bound. The wrappers can also be
+stacked inside each other:
 
-> **Note:** the wrappers cannot currently be stacked inside each other.
-> `BXorBlockAllocator<BBlockAllocator<A>>` does not compile because both
-> wrappers require their inner `A` to be a `BStackSliceAllocator`; each must
-> sit directly above a concrete allocator such as `LinearBStackAllocator`.
+```rust,no_run
+use bstack::{BStack, LinearBStackAllocator};
+use bblock::{BBlockAllocator, BXorBlockAllocator};
+
+let stack = BStack::open("data.bstk").unwrap();
+// XOR checksum over CRC32-checksummed blocks
+let alloc = BXorBlockAllocator::new(BBlockAllocator::new(LinearBStackAllocator::new(stack)));
+```
 
 ---
 
 ## bstack `guarded` feature
 
 When bstack is built with the `guarded` feature (enabled by default in this
-crate's `Cargo.toml`), `BBlock` and `BXorBlock` implement
-`bstack::BStackGuardedSlice`:
+crate's `Cargo.toml`), all four concrete types implement
+`bstack::BStackGuardedSlice`: `BBlock`, `BBlockView`, `BXorBlock`, and
+`BXorBlockView`. The view types additionally implement
+`bstack::BStackGuardedSliceSubview`.
 
-* `as_slice()` returns only the data region — the checksum trailer is hidden.
-* `write()` writes data and keeps the checksum consistent. `BBlock` recomputes
-  the full CRC32; `BXorBlock` updates incrementally.
-* `zero()` zeroes the data region and updates the checksum accordingly.
+* `as_slice()` returns the data region only (the checksum trailer is hidden;
+  for views, only the view's sub-range is exposed).
+* `write()` and `zero()` keep the checksum consistent automatically.
+  `BBlock`/`BBlockView` recompute the full CRC32; `BXorBlock`/`BXorBlockView`
+  update incrementally.
+* `len()`, `is_empty()` (block types) and `len()`, `is_empty()`, `read()`,
+  `write()`, `zero()` (view types) are provided by the trait and require
+  `use bstack::BStackGuardedSlice` to be in scope.
 
 ---
 
@@ -156,10 +167,6 @@ crate's `Cargo.toml`), `BBlock` and `BXorBlock` implement
 
 ```rust
 impl<'a, A: BStackAllocator> BBlock<'a, A> {
-    // Dimensions
-    pub fn len(&self) -> u64;
-    pub fn is_empty(&self) -> bool;
-
     // Serialisation
     pub fn to_bytes(&self) -> [u8; 16];
     pub fn from_bytes(allocator: &'a A, bytes: [u8; 16]) -> Self;
@@ -178,6 +185,16 @@ impl<'a, A: BStackAllocator> BBlock<'a, A> {
     // Unsafe escape hatch — checksum is no longer tracked
     pub unsafe fn into_slice(self) -> BStackSlice<'a, A>;
 }
+
+// requires `use bstack::BStackGuardedSlice`
+impl<'a, A: BStackAllocator> BStackGuardedSlice<'a, A> for BBlock<'a, A> {
+    fn len(&self) -> u64;
+    fn is_empty(&self) -> bool;
+    fn as_slice(&self) -> io::Result<BStackSlice<'a, A>>;
+    fn read(&self) -> io::Result<Vec<u8>>;
+    fn write(&self, data: impl AsRef<[u8]>) -> io::Result<()>;
+    fn zero(&self) -> io::Result<()>;
+}
 ```
 
 ### `BBlockView<'a, A>`
@@ -186,22 +203,15 @@ impl<'a, A: BStackAllocator> BBlock<'a, A> {
 impl<'a, A: BStackAllocator> BBlockView<'a, A> {
     pub fn new(block: &BBlock<'a, A>) -> Self;
 
-    // Dimensions (relative to this view's range)
-    pub fn len(&self) -> u64;
-    pub fn is_empty(&self) -> bool;
-
     // Sub-range — coordinates are relative to this view's start
     pub fn subview(&self, start: u64, end: u64) -> Self;
 
     // Read (from this view's range)
-    pub fn read(&self) -> io::Result<Vec<u8>>;
     pub fn read_into(&self, buf: &mut [u8]) -> io::Result<()>;
     pub fn read_range_into(&self, start: u64, buf: &mut [u8]) -> io::Result<()>;
 
     // Write (to this view's range; always recomputes the full-block checksum)
-    pub fn write(&self, data: &[u8]) -> io::Result<()>;
     pub fn write_range(&self, start: u64, data: &[u8]) -> io::Result<()>;
-    pub fn zero(&self) -> io::Result<()>;
     pub fn zero_range(&self, start: u64, n: u64) -> io::Result<()>;
 
     // Integrity (always over the full block, not just this view's range)
@@ -213,6 +223,21 @@ impl<'a, A: BStackAllocator> BBlockView<'a, A> {
     pub fn reader_at(&self, offset: u64) -> BBlockReader<'a, A>;
     pub fn writer(&self) -> BBlockWriter<'a, A>;
     pub fn writer_at(&self, offset: u64) -> BBlockWriter<'a, A>;
+}
+
+// requires `use bstack::BStackGuardedSlice`
+impl<'a, A: BStackAllocator> BStackGuardedSlice<'a, A> for BBlockView<'a, A> {
+    fn len(&self) -> u64;
+    fn is_empty(&self) -> bool;
+    fn as_slice(&self) -> io::Result<BStackSlice<'a, A>>;
+    fn read(&self) -> io::Result<Vec<u8>>;
+    fn write(&self, data: impl AsRef<[u8]>) -> io::Result<()>;
+    fn zero(&self) -> io::Result<()>;
+}
+
+// requires `use bstack::BStackGuardedSliceSubview`
+impl<'a, A: BStackAllocator> BStackGuardedSliceSubview<'a, A> for BBlockView<'a, A> {
+    fn subview_range(&self, range: Range<u64>) -> impl BStackGuardedSliceSubview<'a, A>;
 }
 ```
 

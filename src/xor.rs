@@ -39,11 +39,18 @@
 //!
 //! # bstack `guarded` feature
 //!
-//! [`BXorBlock`] implements [`bstack::BStackGuardedSlice`] (requires the
-//! bstack `guarded` feature, enabled by default in this crate). `as_slice()`
-//! exposes only the data region. Both `write()` and `zero()` update the XOR
-//! checksum **incrementally** — only the bytes that change are re-read from
-//! storage.
+//! [`BXorBlock`] and [`BXorBlockView`] implement [`bstack::BStackGuardedSlice`]
+//! (requires the bstack `guarded` feature, enabled by default in this crate).
+//! `as_slice()` exposes only the data region (for views, the view's
+//! sub-range). Both `write()` and `zero()` update the XOR checksum
+//! **incrementally** — only the bytes that change are re-read from storage.
+//! [`BXorBlockView`] additionally implements
+//! [`bstack::BStackGuardedSliceSubview`], enabling its use in generic
+//! guarded-I/O contexts.
+//!
+//! `len()` and `is_empty()` on [`BXorBlock`], and `len()`, `is_empty()`,
+//! `read()`, `write()`, and `zero()` on [`BXorBlockView`] are provided by the
+//! trait — callers must `use bstack::BStackGuardedSlice`.
 
 use crate::{BStackRawAllocator, BlockStart};
 use bstack::{
@@ -116,7 +123,8 @@ impl<A: BStackAllocator> BXorBlockAllocator<A> {
 /// `guarded` feature, enabled by default in this crate). `as_slice()` returns
 /// only the data region. `write()` and `zero()` update the XOR checksum
 /// **incrementally**: only the bytes that change are re-read, preserving the
-/// efficiency advantage of the XOR scheme over CRC32.
+/// efficiency advantage of the XOR scheme over CRC32. `len()` and `is_empty()`
+/// are provided by this trait; callers must `use bstack::BStackGuardedSlice`.
 #[derive(Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BXorBlock<'a, A: BStackAllocator> {
     slice: BStackSlice<'a, A>,
@@ -244,6 +252,19 @@ impl<'a, A: BStackAllocator> BXorBlock<'a, A> {
 ///
 /// Like [`crate::crc::BBlockView`], all writes and `verify()` operate on the
 /// **full block checksum**, even through a narrow sub-view.
+///
+/// ## `BStackGuardedSlice` and `BStackGuardedSliceSubview`
+///
+/// `BXorBlockView` implements [`bstack::BStackGuardedSlice`]: `as_slice()`
+/// returns the bytes covered by this view; `write()` and `zero()` update the
+/// XOR checksum incrementally. `len()`, `is_empty()`, `read()`, `write()`,
+/// and `zero()` are provided by this trait; callers must
+/// `use bstack::BStackGuardedSlice`.
+///
+/// `BXorBlockView` also implements [`bstack::BStackGuardedSliceSubview`],
+/// enabling its use where a `T: BStackGuardedSliceSubview` bound is required.
+/// The inherent [`subview`](BXorBlockView::subview) method returns the
+/// concrete `BXorBlockView` type and is preferred for direct calls.
 #[derive(Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BXorBlockView<'a, A: BStackAllocator> {
     slice: BStackSlice<'a, A>,
@@ -588,7 +609,7 @@ impl<'a, A: BStackAllocator> io::Seek for BXorBlockWriter<'a, A> {
 /// a composable allocator layer.
 ///
 /// `Allocated<'_>` is `BXorBlock<'_, BXorBlockAllocator<A>>`. Inner allocated
-/// handles are reconstructed via [`BStackRawAllocator::from_raw`] for
+/// handles are reconstructed via `BStackRawAllocator::from_raw` for
 /// `realloc` and `dealloc`, so no back-conversion from offset alone is needed.
 impl<A> BStackAllocator for BXorBlockAllocator<A>
 where

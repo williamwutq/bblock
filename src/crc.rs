@@ -65,9 +65,16 @@
 //!
 //! # bstack `guarded` feature
 //!
-//! [`BBlock`] implements [`bstack::BStackGuardedSlice`]. `as_slice()` exposes
-//! only the data region; `write()` and `zero()` both recompute the CRC32
-//! checksum after each mutation.
+//! [`BBlock`] and [`BBlockView`] implement [`bstack::BStackGuardedSlice`].
+//! `as_slice()` exposes only the data region (for views, the view's
+//! sub-range). `write()` and `zero()` recompute the CRC32 checksum over the
+//! full block after each mutation. [`BBlockView`] additionally implements
+//! [`bstack::BStackGuardedSliceSubview`], enabling its use in generic
+//! guarded-I/O contexts.
+//!
+//! `len()` and `is_empty()` on [`BBlock`], and `len()`, `is_empty()`,
+//! `read()`, `write()`, and `zero()` on [`BBlockView`] are provided by the
+//! trait — callers must `use bstack::BStackGuardedSlice`.
 
 use crate::{BStackRawAllocator, BlockStart};
 use bstack::{
@@ -155,7 +162,8 @@ impl<A: BStackAllocator> BBlockAllocator<A> {
 /// `BBlock` implements [`bstack::BStackGuardedSlice`] (requires the bstack
 /// `guarded` feature, enabled by default in this crate). `as_slice()` returns
 /// only the data region, hiding the checksum trailer. `write()` and `zero()`
-/// recompute the CRC32 checksum after each mutation.
+/// recompute the CRC32 checksum after each mutation. `len()` and `is_empty()`
+/// are provided by this trait; callers must `use bstack::BStackGuardedSlice`.
 ///
 /// ## Unsafe escape hatch
 ///
@@ -312,6 +320,19 @@ impl<'a, A: BStackAllocator> BBlock<'a, A> {
 /// larger record without having to track absolute offsets. They do not create
 /// independent integrity domains: there is still one checksum per block, and
 /// all views share it.
+///
+/// ## `BStackGuardedSlice` and `BStackGuardedSliceSubview`
+///
+/// `BBlockView` implements [`bstack::BStackGuardedSlice`]: `as_slice()`
+/// returns the bytes covered by this view; `write()` and `zero()` recompute
+/// the CRC32 over the full block. `len()`, `is_empty()`, `read()`, `write()`,
+/// and `zero()` are provided by this trait; callers must
+/// `use bstack::BStackGuardedSlice`.
+///
+/// `BBlockView` also implements [`bstack::BStackGuardedSliceSubview`],
+/// enabling its use where a `T: BStackGuardedSliceSubview` bound is required.
+/// The inherent [`subview`](BBlockView::subview) method returns the concrete
+/// `BBlockView` type and is preferred for direct calls.
 #[derive(Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BBlockView<'a, A: BStackAllocator> {
     /// The full block allocation: `[data: full_len bytes][checksum: 4 bytes]`.
@@ -644,7 +665,7 @@ impl<'a, A: BStackAllocator> io::Seek for BBlockWriter<'a, A> {
 /// composable allocator layer.
 ///
 /// `Allocated<'_>` is `BBlock<'_, BBlockAllocator<A>>`. Inner allocated
-/// handles are reconstructed via [`BStackRawAllocator::from_raw`] for
+/// handles are reconstructed via `BStackRawAllocator::from_raw` for
 /// `realloc` and `dealloc`, so no back-conversion from offset alone is needed.
 impl<A> BStackAllocator for BBlockAllocator<A>
 where
