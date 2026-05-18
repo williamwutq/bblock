@@ -15,7 +15,29 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   now be stacked inside each other. The inner allocator constraint is relaxed
   from `BStackSliceAllocator` to `BStackAllocator` with two crate-internal
   helper traits (`BStackRawAllocator`, `BlockStart`).
+- **`BStackGuardedSlice` impls for view types** — `BBlockView` and
+  `BXorBlockView` now implement `bstack::BStackGuardedSlice`:
+  - `as_slice()` returns the bytes covered by this view (not the full block).
+  - `write()` and `zero()` maintain the block checksum: full CRC32 recompute
+    for `BBlockView`, incremental XOR delta for `BXorBlockView`.
+  - `read()`, `len()`, and `is_empty()` are provided by the trait's defaults
+    and no longer need to be inherent (see **Changed** below).
+- **`BStackGuardedSliceSubview` impls** — `BBlockView` and `BXorBlockView` now
+  implement `bstack::BStackGuardedSliceSubview`, enabling them to be used in
+  generic contexts constrained on `T: BStackGuardedSliceSubview`. The inherent
+  `subview()` method is retained and preferred for direct calls; the trait impl
+  is additive.
 
+### Changed
+
+- **`len()` and `is_empty()` removed from inherent impls of `BBlock` and
+  `BXorBlock`** *(semver-breaking — callers must bring `bstack::BStackGuardedSlice`
+  into scope to call these methods)*. The implementations are identical; the
+  trait is the single source now.
+- **`len()`, `is_empty()`, `read()`, `write()`, and `zero()` removed from
+  inherent impls of `BBlockView` and `BXorBlockView`** *(semver-breaking —
+  same requirement: `use bstack::BStackGuardedSlice`)*. These are now provided
+  by the `BStackGuardedSlice` impl described above.
 
 ---
 
