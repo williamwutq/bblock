@@ -71,7 +71,8 @@
 
 use crate::{BStackRawAllocator, BlockStart};
 use bstack::{
-    BStack, BStackAllocator, BStackGuardedSlice, BStackSlice, BStackSliceReader, BStackSliceWriter,
+    BStack, BStackAllocator, BStackGuardedSlice, BStackGuardedSliceSubview, BStackSlice,
+    BStackSliceReader, BStackSliceWriter,
 };
 use std::cmp::Ordering;
 use std::fmt;
@@ -770,6 +771,17 @@ impl<'a, A: BStackAllocator + 'a> BStackGuardedSlice<'a, A> for BBlock<'a, A> {
         let zeros = vec![0u8; self.len as usize];
         let crc = crc32fast::hash(&zeros);
         unsafe { self.checksum_slice() }.write(crc.to_le_bytes())
+    }
+}
+
+impl<'a, A: BStackAllocator + 'a> BStackGuardedSliceSubview<'a, A> for BBlockView<'a, A> {
+    fn subview(&self, start: u64, end: u64) -> impl BStackGuardedSliceSubview<'a, A> + '_ {
+        BBlockView {
+            slice: self.slice,
+            full_len: self.full_len,
+            start: self.start + start,
+            end: self.start + end,
+        }
     }
 }
 
