@@ -1,5 +1,5 @@
 use bblock::BBlockAllocator;
-use bstack::{BStack, BStackAllocator, LinearBStackAllocator};
+use bstack::{BStack, BStackAllocator, BStackGuardedSlice, LinearBStackAllocator};
 use std::io;
 
 fn main() -> io::Result<()> {

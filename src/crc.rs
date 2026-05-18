@@ -177,16 +177,6 @@ impl<'a, A: BStackAllocator> Clone for BBlock<'a, A> {
 }
 
 impl<'a, A: BStackAllocator> BBlock<'a, A> {
-    /// Number of usable (non-checksum) bytes in this block.
-    pub fn len(&self) -> u64 {
-        self.len
-    }
-
-    /// Returns `true` if this block has zero usable bytes.
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
     /// Serialize this block reference as a 16-byte array.
     ///
     /// The format is `[offset: u64 LE | usable_len: u64 LE]`. Reconstruct
@@ -358,16 +348,6 @@ impl<'a, A: BStackAllocator> BBlockView<'a, A> {
         }
     }
 
-    /// Number of bytes covered by this view.
-    pub fn len(&self) -> u64 {
-        self.end - self.start
-    }
-
-    /// Returns `true` if this view covers zero bytes.
-    pub fn is_empty(&self) -> bool {
-        self.start == self.end
-    }
-
     /// Return a view covering `[start, end)` within this view's coordinate space.
     ///
     /// Coordinates are relative: `subview(0, 3)` on a view that itself starts at
@@ -381,11 +361,6 @@ impl<'a, A: BStackAllocator> BBlockView<'a, A> {
             start: self.start + start,
             end: self.start + end,
         }
-    }
-
-    /// Read all bytes in this view into a new `Vec`.
-    pub fn read(&self) -> io::Result<Vec<u8>> {
-        unsafe { self.data_slice() }.read()
     }
 
     /// Read all bytes in this view into `buf`.
@@ -416,23 +391,10 @@ impl<'a, A: BStackAllocator> BBlockView<'a, A> {
         Ok(crc32fast::hash(&data) == stored)
     }
 
-    /// Overwrite the beginning of this view with `data` and recompute the
-    /// block checksum.
-    pub fn write(&self, data: &[u8]) -> io::Result<()> {
-        unsafe { self.data_slice() }.write(data)?;
-        self.update_checksum()
-    }
-
     /// Overwrite bytes starting at `start` within this view with `data` and
     /// recompute the block checksum.
     pub fn write_range(&self, start: u64, data: &[u8]) -> io::Result<()> {
         unsafe { self.data_slice() }.write_range(start, data)?;
-        self.update_checksum()
-    }
-
-    /// Zero all bytes in this view and recompute the block checksum.
-    pub fn zero(&self) -> io::Result<()> {
-        unsafe { self.data_slice() }.zero()?;
         self.update_checksum()
     }
 
@@ -811,10 +773,41 @@ impl<'a, A: BStackAllocator + 'a> BStackGuardedSlice<'a, A> for BBlock<'a, A> {
     }
 }
 
+/// Implements [`BStackGuardedSlice`] for [`BBlockView`].
+///
+/// * `as_slice()` returns the bytes covered by this view.
+/// * `write()` overwrites the view range and recomputes the CRC32 over the
+///   full block.
+/// * `zero()` zeroes the view range and recomputes the CRC32 over the full
+///   block.
+impl<'a, A: BStackAllocator + 'a> BStackGuardedSlice<'a, A> for BBlockView<'a, A> {
+    fn len(&self) -> u64 {
+        self.end - self.start
+    }
+
+    unsafe fn raw_block(&self) -> BStackSlice<'a, A> {
+        unsafe { self.data_slice() }
+    }
+
+    fn as_slice(&self) -> io::Result<BStackSlice<'a, A>> {
+        Ok(unsafe { self.data_slice() })
+    }
+
+    fn write(&self, data: impl AsRef<[u8]>) -> io::Result<()> {
+        unsafe { self.data_slice() }.write(data.as_ref())?;
+        self.update_checksum()
+    }
+
+    fn zero(&self) -> io::Result<()> {
+        unsafe { self.data_slice() }.zero()?;
+        self.update_checksum()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bstack::{BStack, LinearBStackAllocator};
+    use bstack::{BStack, BStackGuardedSlice, LinearBStackAllocator};
     use tempfile::NamedTempFile;
 
     fn make_allocator() -> (BBlockAllocator<LinearBStackAllocator>, NamedTempFile) {

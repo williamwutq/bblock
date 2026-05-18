@@ -55,7 +55,7 @@
 //! ## CRC32 (default, stronger integrity)
 //!
 //! ```rust,no_run
-//! use bstack::{BStack, BStackAllocator, LinearBStackAllocator};
+//! use bstack::{BStack, BStackAllocator, BStackGuardedSlice, LinearBStackAllocator};
 //! use bblock::BBlockAllocator;
 //!
 //! let stack = BStack::open("data.bstk").unwrap();
@@ -69,7 +69,7 @@
 //! ## XOR (faster writes)
 //!
 //! ```rust,no_run
-//! use bstack::{BStack, BStackAllocator, LinearBStackAllocator};
+//! use bstack::{BStack, BStackAllocator, BStackGuardedSlice, LinearBStackAllocator};
 //! use bblock::xor::BXorBlockAllocator;
 //!
 //! let stack = BStack::open("data.bstk").unwrap();
