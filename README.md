@@ -19,16 +19,16 @@ time whether the stored bytes match the checksum.
 - **Two checksum strategies** — CRC32 (`crc` module / crate root) for stronger
   error detection; XOR (`xor` module) for faster incremental updates on writes.
 - **Composability** — both allocator wrappers implement `BStackAllocator`
-  themselves, so they can be stacked. `BXorBlockAllocator<BBlockAllocator<A>>`
+  themselves, so they can be stacked. `BXorBlockAllocator<BCrcBlockAllocator<A>>`
   gives XOR-checksummed allocations where each inner slot is also CRC32-protected.
-- **`guarded` feature** — `BBlock` and `BXorBlock` implement
+- **`guarded` feature** — `BCrcBlock` and `BXorBlock` implement
   `bstack::BStackGuardedSlice`. `as_slice()` hides the checksum trailer;
   `write()` and `zero()` keep the checksum consistent automatically.
-- **Sub-range views** — `BBlockView::subview(start, end)` lets you operate on a
+- **Sub-range views** — `BCrcBlockView::subview(start, end)` lets you operate on a
   named field of a record; writes still update the full-block checksum.
-- **Cursor-based I/O** — `BBlockReader` and `BBlockWriter` implement
+- **Cursor-based I/O** — `BCrcBlockReader` and `BCrcBlockWriter` implement
   `io::Read`/`io::Write`/`io::Seek` with the same checksum guarantees.
-- **Allocator-agnostic** — `BBlockAllocator<A>` works with any
+- **Allocator-agnostic** — `BCrcBlockAllocator<A>` works with any
   `A: BStackAllocator`; no concrete allocator is imported by this crate.
 
 ---
@@ -45,11 +45,11 @@ bstack = { version = "0.2", features = ["alloc", "set", "guarded"] }
 
 ```rust,no_run
 use bstack::{BStack, BStackGuardedSlice, LinearBStackAllocator};
-use bblock::BBlockAllocator;
+use bblock::BCrcBlockAllocator;
 
 // Open (or create) a bstack file and wrap the allocator.
 let stack = BStack::open("data.bstk").unwrap();
-let alloc = BBlockAllocator::new(LinearBStackAllocator::new(stack));
+let alloc = BCrcBlockAllocator::new(LinearBStackAllocator::new(stack));
 
 // Allocate a 16-byte block.  On disk it occupies 20 bytes (16 + 4 checksum).
 let block = alloc.alloc(16).unwrap();
@@ -107,17 +107,17 @@ assert!(block.verify().unwrap());
 
 Both allocator wrappers implement `BStackAllocator` themselves, so they can be
 passed to any generic API that accepts `T: BStackAllocator`. This is what
-allows `BBlock` and `BXorBlock` to implement `BStackGuardedSlice` without
+allows `BCrcBlock` and `BXorBlock` to implement `BStackGuardedSlice` without
 requiring the stricter `BStackSliceAllocator` bound. The wrappers can also be
 stacked inside each other:
 
 ```rust,no_run
 use bstack::{BStack, LinearBStackAllocator};
-use bblock::{BBlockAllocator, BXorBlockAllocator};
+use bblock::{BCrcBlockAllocator, BXorBlockAllocator};
 
 let stack = BStack::open("data.bstk").unwrap();
 // XOR checksum over CRC32-checksummed blocks
-let alloc = BXorBlockAllocator::new(BBlockAllocator::new(LinearBStackAllocator::new(stack)));
+let alloc = BXorBlockAllocator::new(BCrcBlockAllocator::new(LinearBStackAllocator::new(stack)));
 ```
 
 ---
@@ -126,14 +126,14 @@ let alloc = BXorBlockAllocator::new(BBlockAllocator::new(LinearBStackAllocator::
 
 When bstack is built with the `guarded` feature (enabled by default in this
 crate's `Cargo.toml`), all four concrete types implement
-`bstack::BStackGuardedSlice`: `BBlock`, `BBlockView`, `BXorBlock`, and
+`bstack::BStackGuardedSlice`: `BCrcBlock`, `BCrcBlockView`, `BXorBlock`, and
 `BXorBlockView`. The view types additionally implement
 `bstack::BStackGuardedSliceSubview`.
 
 * `as_slice()` returns the data region only (the checksum trailer is hidden;
   for views, only the view's sub-range is exposed).
 * `write()` and `zero()` keep the checksum consistent automatically.
-  `BBlock`/`BBlockView` recompute the full CRC32; `BXorBlock`/`BXorBlockView`
+  `BCrcBlock`/`BCrcBlockView` recompute the full CRC32; `BXorBlock`/`BXorBlockView`
   update incrementally.
 * `len()`, `is_empty()` (block types) and `len()`, `is_empty()`, `read()`,
   `write()`, `zero()` (view types) are provided by the trait and require
@@ -145,11 +145,11 @@ crate's `Cargo.toml`), all four concrete types implement
 
 | Type                  | Description                                                          |
 |-----------------------|----------------------------------------------------------------------|
-| `BBlockAllocator<A>`  | Wraps `A: BStackAllocator`; `alloc`, `realloc`, `dealloc`            |
-| `BBlock<'a, A>`       | Checksummed block handle; `Copy`; source of views and cursors        |
-| `BBlockView<'a, A>`   | Safe read/write window; supports `subview`                           |
-| `BBlockReader<'a, A>` | `io::Read + io::Seek` over the view's data range                     |
-| `BBlockWriter<'a, A>` | `io::Write + io::Seek`; recomputes full CRC32 after every write      |
+| `BCrcBlockAllocator<A>`  | Wraps `A: BStackAllocator`; `alloc`, `realloc`, `dealloc`            |
+| `BCrcBlock<'a, A>`       | Checksummed block handle; `Copy`; source of views and cursors        |
+| `BCrcBlockView<'a, A>`   | Safe read/write window; supports `subview`                           |
+| `BCrcBlockReader<'a, A>` | `io::Read + io::Seek` over the view's data range                     |
+| `BCrcBlockWriter<'a, A>` | `io::Write + io::Seek`; recomputes full CRC32 after every write      |
 | `CHECKSUM_LENGTH`     | `4` — the CRC32 trailer size in bytes                                |
 
 ### XOR module types (also re-exported at crate root)
@@ -167,10 +167,10 @@ Both CRC and XOR block types expose the same API shape. Substitute `BXorBlock` /
 `BXorBlockView` / `BXorBlockReader` / `BXorBlockWriter` for the CRC32 variants.
 The only behavioural difference is that XOR checksum updates are incremental.
 
-### `BBlock<'a, A>` / `BXorBlock<'a, A>`
+### `BCrcBlock<'a, A>` / `BXorBlock<'a, A>`
 
 ```rust
-impl<'a, A: BStackAllocator> BBlock<'a, A> {       // same for BXorBlock
+impl<'a, A: BStackAllocator> BCrcBlock<'a, A> {       // same for BXorBlock
     // Serialisation
     pub fn to_bytes(&self) -> [u8; 16];
     pub fn from_bytes(allocator: &'a A, bytes: [u8; 16]) -> Self;
@@ -180,18 +180,18 @@ impl<'a, A: BStackAllocator> BBlock<'a, A> {       // same for BXorBlock
     pub fn verify(&self) -> io::Result<bool>;
 
     // Safe access
-    pub fn view(&self) -> BBlockView<'a, A>;
-    pub fn reader(&self) -> BBlockReader<'a, A>;
-    pub fn reader_at(&self, offset: u64) -> BBlockReader<'a, A>;
-    pub fn writer(&self) -> BBlockWriter<'a, A>;
-    pub fn writer_at(&self, offset: u64) -> BBlockWriter<'a, A>;
+    pub fn view(&self) -> BCrcBlockView<'a, A>;
+    pub fn reader(&self) -> BCrcBlockReader<'a, A>;
+    pub fn reader_at(&self, offset: u64) -> BCrcBlockReader<'a, A>;
+    pub fn writer(&self) -> BCrcBlockWriter<'a, A>;
+    pub fn writer_at(&self, offset: u64) -> BCrcBlockWriter<'a, A>;
 
     // Unsafe escape hatch — checksum is no longer tracked
     pub unsafe fn into_slice(self) -> BStackSlice<'a, A>;
 }
 
 // requires `use bstack::BStackGuardedSlice`
-impl<'a, A: BStackAllocator> BStackGuardedSlice<'a, A> for BBlock<'a, A> {
+impl<'a, A: BStackAllocator> BStackGuardedSlice<'a, A> for BCrcBlock<'a, A> {
     fn len(&self) -> u64;
     fn is_empty(&self) -> bool;
     fn as_slice(&self) -> io::Result<BStackSlice<'a, A>>;
@@ -201,11 +201,11 @@ impl<'a, A: BStackAllocator> BStackGuardedSlice<'a, A> for BBlock<'a, A> {
 }
 ```
 
-### `BBlockView<'a, A>` / `BXorBlockView<'a, A>`
+### `BCrcBlockView<'a, A>` / `BXorBlockView<'a, A>`
 
 ```rust
-impl<'a, A: BStackAllocator> BBlockView<'a, A> {   // same for BXorBlockView
-    pub fn new(block: &BBlock<'a, A>) -> Self;
+impl<'a, A: BStackAllocator> BCrcBlockView<'a, A> {   // same for BXorBlockView
+    pub fn new(block: &BCrcBlock<'a, A>) -> Self;
 
     // Sub-range — coordinates are relative to this view's start
     pub fn subview(&self, start: u64, end: u64) -> Self;
@@ -223,14 +223,14 @@ impl<'a, A: BStackAllocator> BBlockView<'a, A> {   // same for BXorBlockView
     pub fn verify(&self) -> io::Result<bool>;
 
     // Cursors
-    pub fn reader(&self) -> BBlockReader<'a, A>;
-    pub fn reader_at(&self, offset: u64) -> BBlockReader<'a, A>;
-    pub fn writer(&self) -> BBlockWriter<'a, A>;
-    pub fn writer_at(&self, offset: u64) -> BBlockWriter<'a, A>;
+    pub fn reader(&self) -> BCrcBlockReader<'a, A>;
+    pub fn reader_at(&self, offset: u64) -> BCrcBlockReader<'a, A>;
+    pub fn writer(&self) -> BCrcBlockWriter<'a, A>;
+    pub fn writer_at(&self, offset: u64) -> BCrcBlockWriter<'a, A>;
 }
 
 // requires `use bstack::BStackGuardedSlice`
-impl<'a, A: BStackAllocator> BStackGuardedSlice<'a, A> for BBlockView<'a, A> {
+impl<'a, A: BStackAllocator> BStackGuardedSlice<'a, A> for BCrcBlockView<'a, A> {
     fn len(&self) -> u64;
     fn is_empty(&self) -> bool;
     fn as_slice(&self) -> io::Result<BStackSlice<'a, A>>;
@@ -240,7 +240,7 @@ impl<'a, A: BStackAllocator> BStackGuardedSlice<'a, A> for BBlockView<'a, A> {
 }
 
 // requires `use bstack::BStackGuardedSliceSubview`
-impl<'a, A: BStackAllocator> BStackGuardedSliceSubview<'a, A> for BBlockView<'a, A> {
+impl<'a, A: BStackAllocator> BStackGuardedSliceSubview<'a, A> for BCrcBlockView<'a, A> {
     fn subview(&self, start: u64, end: u64) -> impl BStackGuardedSliceSubview<'a, A>;
     fn subview_range(&self, range: Range<u64>) -> impl BStackGuardedSliceSubview<'a, A>;
 }
@@ -262,8 +262,8 @@ allocator that natively supports it.
 
 **`unsafe` code, direct `bstack` writes, and buggy allocators are not covered.**  
 The checksum is maintained only when you write through the safe API
-(`BBlockView`, `BBlockWriter`). Writing through a raw `BStackSlice` from
-`BBlock::into_slice`, using bstack directly on the same region, or relying on
+(`BCrcBlockView`, `BCrcBlockWriter`). Writing through a raw `BStackSlice` from
+`BCrcBlock::into_slice`, using bstack directly on the same region, or relying on
 a buggy allocator will all produce stale or incorrect checksums.
 
 **If the checksum itself is corrupted, `verify()` cannot help you.**  
@@ -275,7 +275,7 @@ checksums are a useful building block but are not a substitute for write-ahead
 logs, copy-on-write, two-phase commit, or other proper recovery strategies.
 
 **Avoid double-wrapping small blocks.**  
-Embedding a serialised `BBlock` reference (16 bytes) inside another `BBlock`
+Embedding a serialised `BCrcBlock` reference (16 bytes) inside another `BCrcBlock`
 is valid, but the 4-byte checksum overhead is proportionally significant for
 small payloads. Prefer coarser-grained checksumming for small structures.
 

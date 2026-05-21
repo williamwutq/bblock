@@ -1,4 +1,4 @@
-use bblock::BBlockAllocator;
+use bblock::BCrcBlockAllocator;
 use bstack::{BStack, BStackAllocator, BStackGuardedSlice, LinearBStackAllocator};
 use std::io;
 
@@ -6,13 +6,13 @@ fn main() -> io::Result<()> {
     println!("=== BEFORE MIGRATION: Using raw BStackAllocator ===\n");
     before_migration()?;
 
-    println!("\n=== AFTER MIGRATION: Using BBlockAllocator ===\n");
+    println!("\n=== AFTER MIGRATION: Using BCrcBlockAllocator ===\n");
     after_migration()?;
 
     println!("\n=== MIGRATION GUIDE ===");
-    println!("1. Wrap your BStackAllocator with BBlockAllocator::new()");
-    println!("2. Change alloc() return type from BStackSlice to BBlock");
-    println!("3. Use block.view() to get a BBlockView for read/write");
+    println!("1. Wrap your BStackAllocator with BCrcBlockAllocator::new()");
+    println!("2. Change alloc() return type from BStackSlice to BCrcBlock");
+    println!("3. Use block.view() to get a BCrcBlockView for read/write");
     println!("4. Call block.verify() to check data integrity");
     println!("5. For partial writes, use subview() - it auto-updates the checksum");
 
@@ -35,12 +35,12 @@ fn before_migration() -> io::Result<()> {
 
 fn after_migration() -> io::Result<()> {
     let stack = BStack::open("migration_example.bstack")?;
-    let alloc = BBlockAllocator::new(LinearBStackAllocator::new(stack));
+    let alloc = BCrcBlockAllocator::new(LinearBStackAllocator::new(stack));
 
     let block = alloc.alloc(32)?;
     block.view().write(b"User profile data with checksum")?;
     println!(
-        "BBlock written: {}",
+        "BCrcBlock written: {}",
         String::from_utf8_lossy(&block.view().read()?)
     );
     println!("Verification: {}", block.verify()?);

@@ -1,4 +1,4 @@
-use bblock::{BBlockAllocator, BXorBlockAllocator};
+use bblock::{BCrcBlockAllocator, BXorBlockAllocator};
 use bstack::{BStack, BStackAllocator, BStackGuardedSlice, LinearBStackAllocator};
 use std::io;
 
@@ -14,10 +14,10 @@ fn main() -> io::Result<()> {
 // ---------------------------------------------------------------------------
 
 fn crc_guarded() -> io::Result<()> {
-    println!("=== BBlock via BStackGuardedSlice (CRC32) ===");
+    println!("=== BCrcBlock via BStackGuardedSlice (CRC32) ===");
 
     let stack = BStack::open("guarded_crc.bstack")?;
-    let alloc = BBlockAllocator::new(LinearBStackAllocator::new(stack));
+    let alloc = BCrcBlockAllocator::new(LinearBStackAllocator::new(stack));
     let block = alloc.alloc(16)?;
 
     // write() — operates on the data region only; recomputes the full CRC32.

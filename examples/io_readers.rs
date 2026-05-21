@@ -1,10 +1,10 @@
-use bblock::BBlockAllocator;
+use bblock::BCrcBlockAllocator;
 use bstack::{BStack, BStackAllocator, LinearBStackAllocator};
 use std::io::{Read, Seek, SeekFrom, Write};
 
 fn main() -> std::io::Result<()> {
     let stack = BStack::open("io_example.bstack")?;
-    let alloc = BBlockAllocator::new(LinearBStackAllocator::new(stack));
+    let alloc = BCrcBlockAllocator::new(LinearBStackAllocator::new(stack));
 
     let block = alloc.alloc(1024)?;
 

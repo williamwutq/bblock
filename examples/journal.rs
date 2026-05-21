@@ -1,10 +1,10 @@
-use bblock::BBlockAllocator;
+use bblock::BCrcBlockAllocator;
 use bstack::{BStack, BStackAllocator, BStackGuardedSlice, LinearBStackAllocator};
 use std::io;
 
 fn main() -> io::Result<()> {
     let stack = BStack::open("journal_example.bstack")?;
-    let alloc = BBlockAllocator::new(LinearBStackAllocator::new(stack));
+    let alloc = BCrcBlockAllocator::new(LinearBStackAllocator::new(stack));
 
     let entries = vec![
         "INFO: Application started",

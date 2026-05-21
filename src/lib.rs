@@ -10,15 +10,15 @@
 //! | [`crc`]       | CRC32    | Full-block recompute         | Detection strength matters most     |
 //! | [`xor`]       | XOR      | Incremental (changed bytes only) | Write throughput matters most   |
 //!
-//! Both modules expose the same API shape. CRC types ([`BBlockAllocator`],
-//! [`BBlock`], [`BBlockView`], [`BBlockReader`], [`BBlockWriter`]) are
+//! Both modules expose the same API shape. CRC types ([`BCrcBlockAllocator`],
+//! [`BCrcBlock`], [`BCrcBlockView`], [`BCrcBlockReader`], [`BCrcBlockWriter`]) are
 //! re-exported at the crate root for backward compatibility.
 //!
 //! # Composability
 //!
 //! Both allocator wrappers implement [`bstack::BStackAllocator`] themselves,
 //! so they can be used in any generic context that accepts `T: BStackAllocator`.
-//! This is what allows [`BBlock`] and [`BXorBlock`] to implement
+//! This is what allows [`BCrcBlock`] and [`BXorBlock`] to implement
 //! [`bstack::BStackGuardedSlice`] without requiring the stricter
 //! `BStackSliceAllocator` bound.
 //!
@@ -26,24 +26,24 @@
 //!
 //! ```rust,no_run
 //! use bstack::{BStack, LinearBStackAllocator};
-//! use bblock::{BBlockAllocator, xor::BXorBlockAllocator};
+//! use bblock::{BCrcBlockAllocator, xor::BXorBlockAllocator};
 //!
 //! let stack = BStack::open("data.bstk").unwrap();
 //! // XOR checksum over CRC32-checksummed blocks
-//! let alloc = BXorBlockAllocator::new(BBlockAllocator::new(LinearBStackAllocator::new(stack)));
+//! let alloc = BXorBlockAllocator::new(BCrcBlockAllocator::new(LinearBStackAllocator::new(stack)));
 //! ```
 //!
 //! # bstack `guarded` feature
 //!
 //! When bstack is built with the `guarded` feature (enabled by default in this
 //! crate), all four concrete types implement [`bstack::BStackGuardedSlice`]:
-//! [`BBlock`], [`BBlockView`], [`BXorBlock`], and [`BXorBlockView`]. The view
+//! [`BCrcBlock`], [`BCrcBlockView`], [`BXorBlock`], and [`BXorBlockView`]. The view
 //! types additionally implement [`bstack::BStackGuardedSliceSubview`].
 //!
 //! * `as_slice()` returns the data region only (the checksum trailer is hidden;
 //!   for views, only the view's sub-range is exposed).
 //! * `write()` and `zero()` automatically keep the checksum consistent.
-//!   `BBlock`/`BBlockView` recompute the full CRC32; `BXorBlock`/`BXorBlockView`
+//!   `BCrcBlock`/`BCrcBlockView` recompute the full CRC32; `BXorBlock`/`BXorBlockView`
 //!   update incrementally.
 //! * `len()`, `is_empty()` (block types) and `len()`, `is_empty()`, `read()`,
 //!   `write()`, `zero()` (view types) are provided by the trait — callers must
@@ -61,10 +61,10 @@
 //!
 //! ```rust,no_run
 //! use bstack::{BStack, BStackAllocator, BStackGuardedSlice, LinearBStackAllocator};
-//! use bblock::BBlockAllocator;
+//! use bblock::BCrcBlockAllocator;
 //!
 //! let stack = BStack::open("data.bstk").unwrap();
-//! let alloc = BBlockAllocator::new(LinearBStackAllocator::new(stack));
+//! let alloc = BCrcBlockAllocator::new(LinearBStackAllocator::new(stack));
 //!
 //! let block = alloc.alloc(16).unwrap();
 //! block.view().write(b"hello, bblock!!!").unwrap();
@@ -122,7 +122,18 @@ unsafe impl<A: BStackSliceAllocator> BStackRawAllocator for A {
     }
 }
 
-// Backward-compatible re-exports of the CRC32 types at the crate root.
-pub use crc::{BBlock, BBlockAllocator, BBlockReader, BBlockView, BBlockWriter, CHECKSUM_LENGTH};
-// XOR types also re-exported at the crate root for convenience.
+pub use crc::{
+    BCrcBlock, BCrcBlockAllocator, BCrcBlockReader, BCrcBlockView, BCrcBlockWriter, CHECKSUM_LENGTH,
+};
 pub use xor::{BXorBlock, BXorBlockAllocator, BXorBlockReader, BXorBlockView, BXorBlockWriter};
+
+#[deprecated(since = "0.3.0", note = "Renamed to BCrcBlockAllocator")]
+pub type BBlockAllocator<A> = BCrcBlockAllocator<A>;
+#[deprecated(since = "0.3.0", note = "Renamed to BCrcBlock")]
+pub type BBlock<'a, A> = BCrcBlock<'a, A>;
+#[deprecated(since = "0.3.0", note = "Renamed to BCrcBlockView")]
+pub type BBlockView<'a, A> = BCrcBlockView<'a, A>;
+#[deprecated(since = "0.3.0", note = "Renamed to BCrcBlockReader")]
+pub type BBlockReader<'a, A> = BCrcBlockReader<'a, A>;
+#[deprecated(since = "0.3.0", note = "Renamed to BCrcBlockWriter")]
+pub type BBlockWriter<'a, A> = BCrcBlockWriter<'a, A>;

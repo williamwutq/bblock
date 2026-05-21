@@ -1,11 +1,11 @@
-use bblock::BBlockAllocator;
+use bblock::BCrcBlockAllocator;
 use bstack::{BStack, BStackAllocator, BStackGuardedSlice, LinearBStackAllocator};
 use std::io;
 
 fn main() -> io::Result<()> {
     let stack = BStack::open("combined_example.bstack")?;
     let linear_alloc = LinearBStackAllocator::new(stack);
-    let bblock_alloc = BBlockAllocator::new(linear_alloc);
+    let bblock_alloc = BCrcBlockAllocator::new(linear_alloc);
 
     let header_block = bblock_alloc.alloc(64)?;
     let header_view = header_block.view();
