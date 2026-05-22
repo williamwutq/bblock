@@ -5,14 +5,14 @@
 //! `bblock` wraps any [`BStackAllocator`] and appends a 4-byte checksum to
 //! every allocation. Two checksum strategies are available:
 //!
-//! | Module        | Checksum | Update strategy              | Use when                            |
-//! |---------------|----------|------------------------------|-------------------------------------|
-//! | [`crc`]       | CRC32    | Full-block recompute         | Detection strength matters most     |
-//! | [`xor`]       | XOR      | Incremental (changed bytes only) | Write throughput matters most   |
+//! | Module              | Checksum | Update strategy              | Use when                            |
+//! |---------------------|----------|------------------------------|-------------------------------------|
+//! | [`checksum::crc`]   | CRC32    | Full-block recompute         | Detection strength matters most     |
+//! | [`checksum::xor`]   | XOR      | Incremental (changed bytes only) | Write throughput matters most   |
 //!
-//! Both modules expose the same API shape. CRC types ([`BCrcBlockAllocator`],
-//! [`BCrcBlock`], [`BCrcBlockView`], [`BCrcBlockReader`], [`BCrcBlockWriter`]) are
-//! re-exported at the crate root for backward compatibility.
+//! Both modules expose the same API shape. All types are re-exported at
+//! [`checksum`] (e.g. [`checksum::BCrcBlock`]) and at the
+//! crate root for backward compatibility.
 //!
 //! # Composability
 //!
@@ -26,7 +26,7 @@
 //!
 //! ```rust,no_run
 //! use bstack::{BStack, LinearBStackAllocator};
-//! use bblock::{BCrcBlockAllocator, xor::BXorBlockAllocator};
+//! use bblock::checksum::{BCrcBlockAllocator, BXorBlockAllocator};
 //!
 //! let stack = BStack::open("data.bstk").unwrap();
 //! // XOR checksum over CRC32-checksummed blocks
@@ -75,7 +75,7 @@
 //!
 //! ```rust,no_run
 //! use bstack::{BStack, BStackAllocator, BStackGuardedSlice, LinearBStackAllocator};
-//! use bblock::xor::BXorBlockAllocator;
+//! use bblock::checksum::BXorBlockAllocator;
 //!
 //! let stack = BStack::open("data.bstk").unwrap();
 //! let alloc = BXorBlockAllocator::new(LinearBStackAllocator::new(stack));
@@ -85,8 +85,11 @@
 //! assert!(block.verify().unwrap());
 //! ```
 
-pub mod crc;
-pub mod xor;
+pub mod checksum;
+
+// Backwards compatibility: re-export submodules at their old paths.
+pub use checksum::crc;
+pub use checksum::xor;
 
 use bstack::{BStackAllocator, BStackSlice, BStackSliceAllocator};
 
@@ -122,10 +125,10 @@ unsafe impl<A: BStackSliceAllocator> BStackRawAllocator for A {
     }
 }
 
-pub use crc::{
-    BCrcBlock, BCrcBlockAllocator, BCrcBlockReader, BCrcBlockView, BCrcBlockWriter, CHECKSUM_LENGTH,
+pub use checksum::{
+    BCrcBlock, BCrcBlockAllocator, BCrcBlockReader, BCrcBlockView, BCrcBlockWriter, BXorBlock,
+    BXorBlockAllocator, BXorBlockReader, BXorBlockView, BXorBlockWriter, CHECKSUM_LENGTH,
 };
-pub use xor::{BXorBlock, BXorBlockAllocator, BXorBlockReader, BXorBlockView, BXorBlockWriter};
 
 #[deprecated(since = "0.3.0", note = "Renamed to BCrcBlockAllocator")]
 pub type BBlockAllocator<A> = BCrcBlockAllocator<A>;

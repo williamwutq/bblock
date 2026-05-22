@@ -250,7 +250,7 @@ impl<'a, A: BStackAllocator> BXorBlock<'a, A> {
 /// Writes update the XOR checksum **incrementally** — only the bytes being
 /// changed are read, making small writes to large blocks efficient.
 ///
-/// Like [`crate::crc::BBlockView`], all writes and `verify()` operate on the
+/// Like [`crate::crc::BCrcBlockView`], all writes and `verify()` operate on the
 /// **full block checksum**, even through a narrow sub-view.
 ///
 /// ## `BStackGuardedSlice` and `BStackGuardedSliceSubview`
@@ -491,8 +491,7 @@ impl<'a, A: BStackAllocator> io::Seek for BXorBlockReader<'a, A> {
 /// Implements [`io::Write`] and [`io::Seek`]. Every write updates the XOR
 /// checksum **incrementally** — only the bytes being overwritten are re-read,
 /// not the full block. Constructed via [`BXorBlock::writer`],
-/// [`BXorBlock::writer_at`], [`BXorBlockView::writer`], or
-/// [`BXorBlockView::writer_at`].
+/// [`BXorBlock::writer_at`], [`BXorBlockView::writer`], or [`BXorBlockView::writer_at`].
 #[derive(Clone)]
 pub struct BXorBlockWriter<'a, A: BStackAllocator> {
     inner: BStackSliceWriter<'a, A>,

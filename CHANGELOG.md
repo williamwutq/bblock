@@ -7,7 +7,20 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
-## [0.3.0] - 2026-05-21
+## [Unreleased]
+
+### Added
+
+- **`checksum` module** — `crc` and `xor` are now sub-modules of a unified
+  `bblock::checksum` module. All types are re-exported at `bblock::checksum`
+  so the preferred import style is now:
+  ```rust
+  use bblock::checksum::{BCrcBlockAllocator, BXorBlockAllocator};
+  // or individual types:
+  use bblock::checksum::BCrcBlock;
+  ```
+  The sub-modules remain accessible as `bblock::checksum::crc` and
+  `bblock::checksum::xor` for explicit qualification when needed.
 
 ### Changed
 
@@ -21,7 +34,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
   The old names are still available as `#[deprecated]` type aliases and will be
   removed in a future release. To migrate, find-and-replace the names above and
-  update imports accordingly (`use bblock::BCrcBlockAllocator`).
+  update imports accordingly (`use bblock::checksum::BCrcBlockAllocator`).
+- **`bblock::crc` and `bblock::xor` re-exported for backwards compatibility** —
+  existing imports such as `use bblock::crc::BCrcBlock` or
+  `use bblock::xor::BXorBlockAllocator` continue to compile unchanged.
+  These re-exports will be removed in a future release; prefer
+  `bblock::checksum::crc` / `bblock::checksum::xor` or the flat
+  `bblock::checksum::*` re-exports.
 
 ---
 
