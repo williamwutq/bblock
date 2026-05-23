@@ -86,6 +86,7 @@
 //! ```
 
 pub mod checksum;
+pub mod crypt;
 
 // Backwards compatibility: re-export submodules at their old paths.
 pub use checksum::crc;
