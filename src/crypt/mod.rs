@@ -22,9 +22,12 @@
 pub mod aes;
 pub mod chacha;
 
-pub use aes::{AES_OVERHEAD, BAESBlock, BAESBlockAllocator, BAESBlockReader, BAESBlockWriter};
+pub use aes::{
+    AES_OVERHEAD, BAESBlock, BAESBlockAllocator, BAESBlockReader, BAESBlockView, BAESBlockWriter,
+};
 pub use chacha::{
-    BChaChaBlock, BChaChaBlockAllocator, BChaChaBlockReader, BChaChaBlockWriter, CHACHA_OVERHEAD,
+    BChaChaBlock, BChaChaBlockAllocator, BChaChaBlockReader, BChaChaBlockView, BChaChaBlockWriter,
+    CHACHA_OVERHEAD,
 };
 
 /// Overhead in bytes added to every encrypted block (4 magic + 12 nonce + 16 tag).

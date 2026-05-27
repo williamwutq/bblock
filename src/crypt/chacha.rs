@@ -42,7 +42,7 @@
 //! not be trusted.  This module provides no repair or rollback mechanism.
 
 use crate::{BStackRawAllocator, BlockStart};
-use bstack::{BStack, BStackAllocator, BStackGuardedSlice, BStackSlice};
+use bstack::{BStack, BStackAllocator, BStackGuardedSlice, BStackGuardedSliceSubview, BStackSlice};
 use chacha20poly1305::{
     ChaCha20Poly1305, Key, Nonce,
     aead::{Aead, KeyInit},
@@ -232,6 +232,17 @@ impl<'a, A: BStackAllocator> BChaChaBlock<'a, A> {
         })
     }
 
+    /// Return a [`BChaChaBlockView`] covering the full plaintext region.
+    ///
+    /// The view can be narrowed with [`BChaChaBlockView::subview`].
+    pub fn view(&self) -> BChaChaBlockView<'a, A> {
+        BChaChaBlockView {
+            block: *self,
+            start: 0,
+            end: self.len,
+        }
+    }
+
     /// Consume the block and return the raw underlying [`BStackSlice`].
     ///
     /// # Safety
@@ -296,6 +307,149 @@ where
             key: allocator.key,
             nonce_gen: allocator.nonce_gen,
         }
+    }
+}
+
+// ── View ─────────────────────────────────────────────────────────────────────
+
+/// A read/write sub-range view over a [`BChaChaBlock`].
+///
+/// A full-range view is obtained via [`BChaChaBlock::view`];
+/// a sub-range via [`BChaChaBlockView::subview`]. All coordinates are
+/// **relative** to the current view's start.
+///
+/// ## Write semantics
+///
+/// Because ChaCha20-Poly1305 is a full-block AEAD cipher, every write —
+/// even a single byte — decrypts the full plaintext, patches the covered
+/// range, and re-encrypts with a fresh nonce. The authentication tag always
+/// covers the entire block.
+///
+/// ## `BStackGuardedSlice` and `BStackGuardedSliceSubview`
+///
+/// `BChaChaBlockView` implements [`bstack::BStackGuardedSlice`]: `write()`
+/// and `zero()` operate on the view's sub-range while re-encrypting the full
+/// block. `as_slice()` is intentionally unsupported. It also implements
+/// [`bstack::BStackGuardedSliceSubview`] for use in generic guarded-I/O
+/// contexts.
+pub struct BChaChaBlockView<'a, A: BStackAllocator> {
+    block: BChaChaBlock<'a, A>,
+    start: u64,
+    end: u64,
+}
+
+impl<'a, A: BStackAllocator> Copy for BChaChaBlockView<'a, A> {}
+
+impl<'a, A: BStackAllocator> Clone for BChaChaBlockView<'a, A> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'a, A: BStackAllocator> fmt::Debug for BChaChaBlockView<'a, A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BChaChaBlockView")
+            .field("start", &self.start)
+            .field("end", &self.end)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, A: BStackAllocator> PartialEq for BChaChaBlockView<'a, A> {
+    fn eq(&self, other: &Self) -> bool {
+        self.block == other.block && self.start == other.start && self.end == other.end
+    }
+}
+
+impl<'a, A: BStackAllocator> Eq for BChaChaBlockView<'a, A> {}
+
+impl<'a, A: BStackAllocator> Hash for BChaChaBlockView<'a, A> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.block.hash(state);
+        self.start.hash(state);
+        self.end.hash(state);
+    }
+}
+
+impl<'a, A: BStackAllocator> PartialOrd for BChaChaBlockView<'a, A> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<'a, A: BStackAllocator> Ord for BChaChaBlockView<'a, A> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.block
+            .cmp(&other.block)
+            .then(self.start.cmp(&other.start))
+            .then(self.end.cmp(&other.end))
+    }
+}
+
+impl<'a, A: BStackAllocator> BChaChaBlockView<'a, A> {
+    /// Return a view covering `[start, end)` within this view's coordinate space.
+    ///
+    /// Coordinates are relative: `subview(0, 3)` on a view starting at byte 5
+    /// produces a view covering bytes 5–7 of the block's plaintext.
+    pub fn subview(&self, start: u64, end: u64) -> Self {
+        BChaChaBlockView {
+            block: self.block,
+            start: self.start + start,
+            end: self.start + end,
+        }
+    }
+
+    /// Return `true` if the block decrypts and authenticates successfully.
+    pub fn verify(&self) -> io::Result<bool> {
+        self.block.verify()
+    }
+
+    /// Decrypt and return the bytes covered by this view.
+    pub fn read(&self) -> io::Result<Vec<u8>> {
+        let plaintext = self.block.decrypt_read()?;
+        Ok(plaintext[self.start as usize..self.end as usize].to_vec())
+    }
+
+    fn patch_and_encrypt(&self, data: &[u8]) -> io::Result<()> {
+        let mut plaintext = self.block.decrypt_read()?;
+        plaintext[self.start as usize..self.end as usize].copy_from_slice(data);
+        self.block.encrypt_write(&plaintext)
+    }
+
+    fn zero_and_encrypt(&self) -> io::Result<()> {
+        let mut plaintext = self.block.decrypt_read()?;
+        plaintext[self.start as usize..self.end as usize].fill(0);
+        self.block.encrypt_write(&plaintext)
+    }
+}
+
+impl<'a, A: BStackAllocator + 'a> BStackGuardedSliceSubview<'a, A> for BChaChaBlockView<'a, A> {
+    fn subview(&self, start: u64, end: u64) -> impl BStackGuardedSliceSubview<'a, A> + '_ {
+        BChaChaBlockView {
+            block: self.block,
+            start: self.start + start,
+            end: self.start + end,
+        }
+    }
+}
+
+impl<'a, A: BStackAllocator + 'a> BStackGuardedSlice<'a, A> for BChaChaBlockView<'a, A> {
+    fn len(&self) -> u64 {
+        self.end - self.start
+    }
+
+    unsafe fn raw_block(&self) -> BStackSlice<'a, A> {
+        self.block.slice
+    }
+
+    // as_slice() left at default — ciphertext has no safe plaintext mapping
+
+    fn write(&self, data: impl AsRef<[u8]>) -> io::Result<()> {
+        self.patch_and_encrypt(data.as_ref())
+    }
+
+    fn zero(&self) -> io::Result<()> {
+        self.zero_and_encrypt()
     }
 }
 
@@ -762,5 +916,73 @@ mod tests {
         assert_eq!(block2.len(), 4);
         assert!(block2.verify().unwrap());
         assert_eq!(block2.read().unwrap(), b"abcd");
+    }
+
+    #[test]
+    fn test_view_read_full() {
+        let (alloc, _f) = make_allocator();
+        let block = alloc.alloc(8).unwrap();
+        block.write(b"abcdefgh").unwrap();
+        let view = block.view();
+        assert_eq!(view.len(), 8);
+        assert_eq!(view.read().unwrap(), b"abcdefgh");
+    }
+
+    #[test]
+    fn test_view_read_subrange() {
+        let (alloc, _f) = make_allocator();
+        let block = alloc.alloc(8).unwrap();
+        block.write(b"abcdefgh").unwrap();
+        let sub = block.view().subview(2, 6);
+        assert_eq!(sub.len(), 4);
+        assert_eq!(sub.read().unwrap(), b"cdef");
+    }
+
+    #[test]
+    fn test_view_write_subrange() {
+        let (alloc, _f) = make_allocator();
+        let block = alloc.alloc(8).unwrap();
+        block.write(b"abcdefgh").unwrap();
+        block.view().subview(2, 5).write(b"XYZ").unwrap();
+        assert!(block.verify().unwrap());
+        assert_eq!(block.read().unwrap(), b"abXYZfgh");
+    }
+
+    #[test]
+    fn test_view_zero_subrange() {
+        let (alloc, _f) = make_allocator();
+        let block = alloc.alloc(8).unwrap();
+        block.write(b"abcdefgh").unwrap();
+        block.view().subview(3, 6).zero().unwrap();
+        assert!(block.verify().unwrap());
+        assert_eq!(block.read().unwrap(), b"abc\x00\x00\x00gh");
+    }
+
+    #[test]
+    fn test_view_subview_nested() {
+        let (alloc, _f) = make_allocator();
+        let block = alloc.alloc(8).unwrap();
+        block.write(b"abcdefgh").unwrap();
+        // subview [2, 6) then [1, 3) of that → block bytes [3, 5)
+        let sub = block.view().subview(2, 6).subview(1, 3);
+        assert_eq!(sub.len(), 2);
+        assert_eq!(sub.read().unwrap(), b"de");
+        sub.write(b"XY").unwrap();
+        assert!(block.verify().unwrap());
+        assert_eq!(block.read().unwrap(), b"abcXYfgh");
+    }
+
+    #[test]
+    fn test_view_verify() {
+        let (alloc, _f) = make_allocator();
+        let block = alloc.alloc(4).unwrap();
+        block.write(b"test").unwrap();
+        assert!(block.view().verify().unwrap());
+        let raw = unsafe { block.into_slice() };
+        let mut b = [0u8; 1];
+        raw.subslice(16, 17).read_into(&mut b).unwrap();
+        b[0] ^= 0xff;
+        raw.subslice(16, 17).write(b).unwrap();
+        assert!(!block.view().verify().unwrap());
     }
 }
