@@ -11,6 +11,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **`crypt` module** — authenticated-encryption block types under
+  `bblock::crypt`. Two algorithms are provided: `BChaChaBlock*`
+  (ChaCha20-Poly1305) and `BAESBlock*` (AES-256-GCM). Both follow the same
+  allocator-wrapper pattern as the checksum types and include block handles,
+  sub-range views, and cursor-based readers/writers. The AEAD tag covers the
+  full block, so no separate checksum layer is needed. On-disk overhead is 32
+  bytes per block (4 magic + 12 nonce + 16 tag).
+
 - **`checksum` module** — `crc` and `xor` are now sub-modules of a unified
   `bblock::checksum` module. All types are re-exported at `bblock::checksum`
   so the preferred import style is now:
