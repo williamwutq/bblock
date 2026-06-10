@@ -11,6 +11,26 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **`compress` module** — transparent LZMA2 compression block types under
+  `bblock::compress::lzma2`, built on the [`lzma-rust2`](https://crates.io/crates/lzma-rust2)
+  crate: `BLZMA2BlockAllocator`, `BLZMA2Block`, `BLZMA2BlockReader`, and
+  `BLZMA2BlockWriter`.
+  - Since compressed size is data-dependent, `alloc(n)` declares an on-disk
+    payload capacity `n` and reserves `n + LZMA2_OVERHEAD` (13) bytes on
+    disk. `preset` (LZMA2 compression level) is configured on the allocator
+    via `BLZMA2BlockAllocator::new(inner, preset)`.
+  - Each block stores a small header (magic, raw/compressed flag, plaintext
+    length, payload length). A write is stored compressed if the compressed
+    stream fits in `n` bytes, otherwise stored raw if the plaintext itself
+    fits in `n` bytes, otherwise the write fails.
+  - `BLZMA2Block` implements `bstack::BStackGuardedSlice`: `post_read`
+    decompresses, `pre_write` compresses and frames the payload, and `zero()`
+    stores an empty-plaintext frame. `len()` returns the on-disk payload
+    capacity `n` declared at `alloc(n)`; `as_slice()` is unsupported, since
+    compressed bytes have no safe plaintext mapping. `BLZMA2BlockWriter`
+    accumulates writes in memory and compresses on `flush`/`drop`, allowing
+    writes larger than `n` as long as they compress to fit within `n`.
+
 - **`crypt` module** — authenticated-encryption block types under
   `bblock::crypt`. Two algorithms are provided: `BChaChaBlock*`
   (ChaCha20-Poly1305) and `BAESBlock*` (AES-256-GCM). Both follow the same
@@ -49,6 +69,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   These re-exports will be removed in a future release; prefer
   `bblock::checksum::crc` / `bblock::checksum::xor` or the flat
   `bblock::checksum::*` re-exports.
+
+### Dependencies
+
+- [`lzma-rust2`](https://crates.io/crates/lzma-rust2) `0.16` with
+  `features = ["std", "encoder", "optimization"]`, `default-features = false`.
 
 ---
 
