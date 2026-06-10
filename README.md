@@ -30,6 +30,9 @@ time whether the stored bytes match the checksum.
   `io::Read`/`io::Write`/`io::Seek` with the same checksum guarantees.
 - **Allocator-agnostic** — `BCrcBlockAllocator<A>` works with any
   `A: BStackAllocator`; no concrete allocator is imported by this crate.
+- **LZMA2 compression** — `compress::BLZMA2BlockAllocator` transparently
+  compresses every allocation, with an automatic raw-storage fallback for
+  incompressible data.
 
 ---
 
@@ -103,6 +106,50 @@ assert!(block.verify().unwrap());
 
 ---
 
+## Compression (LZMA2)
+
+`compress::BLZMA2BlockAllocator` transparently compresses every allocation
+with LZMA2. Since compressed size is data-dependent, `alloc(n)` declares an
+on-disk payload capacity `n` and reserves `n + LZMA2_OVERHEAD` (13) bytes on
+disk. A write is stored compressed if the compressed stream fits in `n`
+bytes, otherwise stored raw if the plaintext itself fits in `n` bytes,
+otherwise the write fails.
+
+```rust,no_run
+use bstack::{BStack, BStackAllocator, BStackGuardedSlice, LinearBStackAllocator};
+use bblock::compress::BLZMA2BlockAllocator;
+use std::io::Write;
+
+// Open (or create) a bstack file and wrap the allocator.
+// `6` is the LZMA2 compression preset (0-9).
+let stack = BStack::open("data.bstk").unwrap();
+let alloc = BLZMA2BlockAllocator::new(LinearBStackAllocator::new(stack), 6);
+
+// Allocate a block with 256 bytes of on-disk payload capacity.
+// On disk it occupies 256 + 13 = 269 bytes.
+let block = alloc.alloc(256).unwrap();
+
+// Writes are compressed transparently and verified on read.
+block.write(b"hello, compressed bblock!").unwrap();
+assert!(block.verify().unwrap());
+assert_eq!(block.read().unwrap(), b"hello, compressed bblock!");
+
+// The buffered writer compresses on flush/drop and does not silently
+// truncate; it errors if the data cannot fit even after compression.
+let mut w = block.writer().unwrap();
+w.write_all(b"more data, compressed on flush").unwrap();
+w.flush().unwrap();
+```
+
+`BLZMA2Block` implements `bstack::BStackGuardedSlice`: `read()`/`write()`
+transparently decompress/compress, `len()` returns `n`, and `as_slice()` is
+unsupported (compressed bytes have no safe plaintext mapping). Unlike
+`BStackGuardedSlice::write`, which truncates its input to `n` bytes before
+compression, `BLZMA2BlockWriter` accepts writes larger than `n` as long as
+they compress to fit within `n`.
+
+---
+
 ## Composability
 
 Both allocator wrappers implement `BStackAllocator` themselves, so they can be
@@ -166,6 +213,16 @@ crate's `Cargo.toml`), all four concrete types implement
 Both CRC and XOR block types expose the same API shape. Substitute `BXorBlock` /
 `BXorBlockView` / `BXorBlockReader` / `BXorBlockWriter` for the CRC32 variants.
 The only behavioural difference is that XOR checksum updates are incremental.
+
+### Compression module types (`compress::lzma2`)
+
+| Type                      | Description                                                          |
+|---------------------------|----------------------------------------------------------------------|
+| `BLZMA2BlockAllocator<A>` | Wraps `A: BStackAllocator`; `alloc(n)` reserves `n + LZMA2_OVERHEAD` bytes |
+| `BLZMA2Block<'a, A>`      | Compressed block handle; `Copy`; source of readers and writers      |
+| `BLZMA2BlockReader<'a, A>`| `io::Read + io::Seek` over the decompressed plaintext                |
+| `BLZMA2BlockWriter<'a, A>`| `io::Write + io::Seek`; recompresses on flush, falling back to raw   |
+| `LZMA2_OVERHEAD`          | `13` — the per-block header size in bytes                            |
 
 ### `BCrcBlock<'a, A>` / `BXorBlock<'a, A>`
 
