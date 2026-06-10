@@ -9,12 +9,12 @@
 //!
 //! Unlike the [`crate::crypt`] wrappers — whose ciphertext is always the same
 //! length as the plaintext — compressed payloads have a data-dependent size.
-//! To keep the allocation model fixed-size, the allocator carries a
-//! `capacity_factor` `k` (≥ 1.0). `alloc(n)` reserves `ceil(k * n) + LZMA2_OVERHEAD`
-//! bytes on disk: `n` is the "compressed budget" and `ceil(k * n)` is the
-//! raw-fallback capacity — the largest plaintext that always fits even if
-//! compression provides no gain. Fractional factors (e.g. `1.5`) let callers
-//! tune the space/safety trade-off precisely.
+//! `alloc(n)` reserves `n + LZMA2_OVERHEAD` bytes on disk: `n` is both the
+//! apparent capacity (`len()`) and the on-disk payload budget. On write, the
+//! plaintext is compressed and the result is stored if it fits within `n`
+//! bytes; otherwise the plaintext itself is stored raw if it fits within `n`
+//! bytes; otherwise the write fails. [`BStackGuardedSlice::write`] truncates
+//! its input to `n` bytes first, so it always fits via the raw fallback.
 //!
 //! The main types:
 //!
@@ -33,7 +33,7 @@
 //! [plaintext_len: 4 bytes LE]  // decompressed payload length
 //! [payload_len: 4 bytes LE]    // bytes occupied by the payload region
 //! [payload: payload_len bytes] // compressed stream (flag=1) or raw plaintext (flag=0)
-//! [unused: padding up to ceil(k*n) bytes]
+//! [unused: padding up to n bytes]
 //! ```
 //!
 //! Total overhead: [`LZMA2_OVERHEAD`] = 13 bytes per block.
@@ -79,38 +79,21 @@ pub const LZMA2_OVERHEAD: u64 = 13;
 /// with LZMA2.
 ///
 /// `preset` selects the LZMA2 compression level (0–9; 6 is the LZMA default).
-/// `capacity_factor` `k` (≥ 1.0) is the over-reservation multiplier:
-/// `alloc(n)` reserves `ceil(k * n) + LZMA2_OVERHEAD` bytes on disk.
-/// The slack accommodates incompressible payloads via raw storage, and
-/// fractional values (e.g. `1.5`) trade space for larger safe plaintext sizes.
+/// `alloc(n)` reserves `n + LZMA2_OVERHEAD` bytes on disk: `n` is both the
+/// apparent capacity and the on-disk payload budget shared by the compressed
+/// stream and the raw fallback.
 pub struct BLZMA2BlockAllocator<A: BStackAllocator> {
     inner: A,
     preset: u32,
-    capacity_factor: f64,
 }
 
 impl<A: BStackAllocator> BLZMA2BlockAllocator<A> {
     /// Create a new allocator wrapping `inner`.
     ///
-    /// * `preset` — LZMA2 compression preset (0–9). Higher values compress
-    ///   harder; values above 9 are clamped to 9 by `lzma-rust2`.
-    /// * `capacity_factor` — `k`, the on-disk over-reservation multiplier.
-    ///   Must be a finite number ≥ 1.0. `k = 1.0` reserves exactly `n` bytes
-    ///   for raw fallback; `k = 1.5` reserves `ceil(1.5 * n)` bytes.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `capacity_factor` is not a finite number ≥ 1.0.
-    pub fn new(inner: A, preset: u32, capacity_factor: f64) -> Self {
-        assert!(
-            capacity_factor.is_finite() && capacity_factor >= 1.0,
-            "capacity_factor must be a finite number >= 1.0"
-        );
-        Self {
-            inner,
-            preset,
-            capacity_factor,
-        }
+    /// `preset` is the LZMA2 compression preset (0–9). Higher values compress
+    /// harder; values above 9 are clamped to 9 by `lzma-rust2`.
+    pub fn new(inner: A, preset: u32) -> Self {
+        Self { inner, preset }
     }
 
     /// Return a shared reference to the inner allocator.
@@ -127,11 +110,6 @@ impl<A: BStackAllocator> BLZMA2BlockAllocator<A> {
     pub fn preset(&self) -> u32 {
         self.preset
     }
-
-    /// The on-disk over-reservation multiplier `k`.
-    pub fn capacity_factor(&self) -> f64 {
-        self.capacity_factor
-    }
 }
 
 // ── Block handle ─────────────────────────────────────────────────────────────
@@ -144,13 +122,14 @@ impl<A: BStackAllocator> BLZMA2BlockAllocator<A> {
 ///
 /// ## Capacity model
 ///
-/// `n` is the *compressed budget* declared at `alloc(n)` time.
-/// `raw_capacity() = ceil(capacity_factor * n)` is the *raw-fallback capacity* —
-/// the largest plaintext that is guaranteed to fit even if it does not compress.
-/// Writes through [`BStackGuardedSlice::write`] are silently truncated to
-/// `raw_capacity()` bytes before compression. For writes that must not be
-/// silently truncated, use [`BLZMA2BlockWriter`] which fails explicitly when
-/// the buffer cannot fit after compression.
+/// `n` is the on-disk payload capacity declared at `alloc(n)` time, shared by
+/// the compressed stream and the raw fallback: a write is stored compressed
+/// if the compressed stream fits in `n` bytes, otherwise stored raw if the
+/// plaintext itself fits in `n` bytes, otherwise the write fails.
+/// Writes through [`BStackGuardedSlice::write`] are silently truncated to `n`
+/// bytes before compression, so they always fit via the raw fallback. For
+/// writes that must not be silently truncated, use [`BLZMA2BlockWriter`]
+/// which fails explicitly when the buffer cannot fit after compression.
 ///
 /// ## Reading and writing
 ///
@@ -170,10 +149,9 @@ impl<A: BStackAllocator> BLZMA2BlockAllocator<A> {
 /// so callers can distinguish corruption from I/O errors.
 pub struct BLZMA2Block<'a, A: BStackAllocator> {
     slice: BStackSlice<'a, A>,
-    /// `n` — the compressed budget passed to `alloc(n)`.
+    /// `n` — the on-disk payload capacity passed to `alloc(n)`.
     n: u64,
     preset: u32,
-    capacity_factor: f64,
 }
 
 impl<'a, A: BStackAllocator> Copy for BLZMA2Block<'a, A> {}
@@ -189,7 +167,6 @@ impl<'a, A: BStackAllocator> fmt::Debug for BLZMA2Block<'a, A> {
         f.debug_struct("BLZMA2Block")
             .field("start", &self.slice.start())
             .field("n", &self.n)
-            .field("capacity_factor", &self.capacity_factor)
             .field("preset", &self.preset)
             .finish_non_exhaustive()
     }
@@ -231,9 +208,9 @@ impl<'a, A: BStackAllocator> From<BLZMA2Block<'a, A>> for [u8; 16] {
 impl<'a, A: BStackAllocator> BLZMA2Block<'a, A> {
     /// Serialize this block reference as a 16-byte array `[offset: u64 LE | n: u64 LE]`.
     ///
-    /// `n` is the compressed budget declared at allocation time;
+    /// `n` is the on-disk payload capacity declared at allocation time;
     /// [`BLZMA2Block::from_bytes`] reconstructs the disk reservation from it
-    /// using the allocator's `capacity_factor`.
+    /// as `n + LZMA2_OVERHEAD`.
     pub fn to_bytes(&self) -> [u8; 16] {
         let mut out = [0u8; 16];
         out[..8].copy_from_slice(&self.slice.start().to_le_bytes());
@@ -241,20 +218,9 @@ impl<'a, A: BStackAllocator> BLZMA2Block<'a, A> {
         out
     }
 
-    /// The compressed budget `n` declared at `alloc(n)` time.
-    pub fn compressed_budget(&self) -> u64 {
+    /// The on-disk payload capacity `n` declared at `alloc(n)` time.
+    pub fn capacity(&self) -> u64 {
         self.n
-    }
-
-    /// The raw-fallback capacity `ceil(capacity_factor * n)` — the largest
-    /// plaintext that is guaranteed to fit on disk even without compression.
-    pub fn raw_capacity(&self) -> u64 {
-        (self.n as f64 * self.capacity_factor).ceil() as u64
-    }
-
-    /// On-disk payload region size (excludes [`LZMA2_OVERHEAD`]).
-    fn disk_payload_size(&self) -> u64 {
-        self.raw_capacity()
     }
 
     /// Return `true` if the block decompresses successfully (magic matches,
@@ -317,10 +283,10 @@ impl<'a, A: BStackAllocator> BLZMA2Block<'a, A> {
 
     /// Compress `plaintext`, frame it with the on-disk header, and return the
     /// framed bytes (without padding). Falls back to raw storage when the
-    /// compressed output would exceed `disk_payload_size`. Returns
-    /// `InvalidInput` if neither path fits.
+    /// compressed output would exceed `n` bytes. Returns `InvalidInput` if
+    /// neither path fits.
     fn compress_frame(&self, plaintext: &[u8]) -> io::Result<Vec<u8>> {
-        let disk_payload = self.disk_payload_size();
+        let disk_payload = self.n;
         let compressed = lzma2_compress(plaintext, self.preset)?;
 
         let (flag, payload): (u8, &[u8]) = if (compressed.len() as u64) <= disk_payload {
@@ -440,7 +406,7 @@ impl<'a, A: BStackAllocator> BLZMA2Block<'a, A> {
 
 // Reconstruct a block reference from a 16-byte serialized handle.
 // Requires the allocator type to be BLZMA2BlockAllocator so we can recover
-// the preset and capacity_factor.
+// the preset.
 #[allow(private_bounds)]
 impl<'a, A> BLZMA2Block<'a, BLZMA2BlockAllocator<A>>
 where
@@ -452,12 +418,11 @@ where
     pub fn from_bytes(allocator: &'a BLZMA2BlockAllocator<A>, bytes: [u8; 16]) -> Self {
         let offset = u64::from_le_bytes(bytes[..8].try_into().unwrap());
         let n = u64::from_le_bytes(bytes[8..].try_into().unwrap());
-        let disk_len = (n as f64 * allocator.capacity_factor).ceil() as u64 + LZMA2_OVERHEAD;
+        let disk_len = n + LZMA2_OVERHEAD;
         BLZMA2Block {
             slice: unsafe { BStackSlice::from_raw_parts(allocator, offset, disk_len) },
             n,
             preset: allocator.preset,
-            capacity_factor: allocator.capacity_factor,
         }
     }
 }
@@ -620,8 +585,7 @@ where
     }
 
     fn alloc(&self, n: u64) -> io::Result<BLZMA2Block<'_, BLZMA2BlockAllocator<A>>> {
-        let disk_payload = (n as f64 * self.capacity_factor).ceil() as u64;
-        let disk_len = disk_payload + LZMA2_OVERHEAD;
+        let disk_len = n + LZMA2_OVERHEAD;
         let inner = self.inner.alloc(disk_len)?;
         let offset = inner.block_start();
         let slice = unsafe { BStackSlice::from_raw_parts(self, offset, disk_len) };
@@ -629,7 +593,6 @@ where
             slice,
             n,
             preset: self.preset,
-            capacity_factor: self.capacity_factor,
         };
         block.init_empty()?;
         Ok(block)
@@ -641,9 +604,8 @@ where
         new_n: u64,
     ) -> io::Result<BLZMA2Block<'a, BLZMA2BlockAllocator<A>>> {
         let offset = block.slice.start();
-        let old_disk_len = (block.n as f64 * self.capacity_factor).ceil() as u64 + LZMA2_OVERHEAD;
-        let new_disk_payload = (new_n as f64 * self.capacity_factor).ceil() as u64;
-        let new_disk_len = new_disk_payload + LZMA2_OVERHEAD;
+        let old_disk_len = block.n + LZMA2_OVERHEAD;
+        let new_disk_len = new_n + LZMA2_OVERHEAD;
 
         let inner_old_slice =
             unsafe { BStackSlice::from_raw_parts(&self.inner, offset, old_disk_len) };
@@ -657,7 +619,6 @@ where
                 slice,
                 n: new_n,
                 preset: block.preset,
-                capacity_factor: block.capacity_factor,
             });
         }
 
@@ -670,11 +631,10 @@ where
             slice: new_slice,
             n: new_n,
             preset: block.preset,
-            capacity_factor: block.capacity_factor,
         };
-        // Truncate plaintext if it cannot fit the new raw capacity.
-        let truncated = if plaintext.len() as u64 > new_disk_payload {
-            &plaintext[..new_disk_payload as usize]
+        // Truncate plaintext if it cannot fit the new capacity.
+        let truncated = if plaintext.len() as u64 > new_n {
+            &plaintext[..new_n as usize]
         } else {
             &plaintext[..]
         };
@@ -684,7 +644,7 @@ where
 
     fn dealloc(&self, block: BLZMA2Block<'_, BLZMA2BlockAllocator<A>>) -> io::Result<()> {
         let offset = block.slice.start();
-        let disk_len = (block.n as f64 * self.capacity_factor).ceil() as u64 + LZMA2_OVERHEAD;
+        let disk_len = block.n + LZMA2_OVERHEAD;
         let inner_slice = unsafe { BStackSlice::from_raw_parts(&self.inner, offset, disk_len) };
         let inner: A::Allocated<'_> = unsafe { A::from_raw(inner_slice) };
         self.inner.dealloc(inner)
@@ -712,10 +672,11 @@ impl<'a, A: BStackAllocator> BlockStart for BLZMA2Block<'a, A> {
 
 // ── BStackGuardedSlice impl ───────────────────────────────────────────────────
 
-/// * `len()` returns `n`, the compressed budget declared at `alloc(n)` — the
-///   apparent data capacity for this block. The default `write()` truncates
-///   its input to `n` bytes before calling `pre_write`; since `n ≤ raw_capacity`,
-///   the raw-fallback path always fits.
+/// * `len()` returns `n`, the on-disk payload capacity declared at `alloc(n)`
+///   — the apparent data capacity for this block. The default `write()`
+///   truncates its input to `n` bytes before calling `pre_write`; since the
+///   raw fallback fits any plaintext of `n` bytes or fewer, the truncated
+///   write always succeeds.
 /// * `post_read` decompresses raw on-disk bytes into plaintext via the
 ///   [`decompress_raw`](BLZMA2Block::decompress_raw) helper.
 /// * `pre_write` compresses plaintext and frames it for disk via
@@ -777,46 +738,26 @@ mod tests {
     use tempfile::NamedTempFile;
 
     fn make_allocator() -> (BLZMA2BlockAllocator<LinearBStackAllocator>, NamedTempFile) {
-        make_allocator_with(6, 2.0)
+        make_allocator_with(6)
     }
 
     fn make_allocator_with(
         preset: u32,
-        k: f64,
     ) -> (BLZMA2BlockAllocator<LinearBStackAllocator>, NamedTempFile) {
         let file = NamedTempFile::new().unwrap();
         let stack = BStack::open(file.path()).unwrap();
-        let alloc = BLZMA2BlockAllocator::new(LinearBStackAllocator::new(stack), preset, k);
+        let alloc = BLZMA2BlockAllocator::new(LinearBStackAllocator::new(stack), preset);
         (alloc, file)
     }
 
     #[test]
-    fn test_alloc_reserves_ceil_k_times_n_plus_overhead() {
-        let (alloc, _f) = make_allocator_with(6, 2.0);
+    fn test_alloc_reserves_n_plus_overhead() {
+        let (alloc, _f) = make_allocator();
         let block = alloc.alloc(64).unwrap();
-        // k=2.0, n=64 → disk = 128 + 13 = 141
+        // n=64 → disk = 64 + 13 = 77
         let raw_len = unsafe { block.into_slice().len() };
-        assert_eq!(raw_len, 128 + LZMA2_OVERHEAD);
-        assert_eq!(block.compressed_budget(), 64);
-        assert_eq!(block.raw_capacity(), 128);
-    }
-
-    #[test]
-    fn test_fractional_capacity_factor_rounds_up() {
-        let (alloc, _f) = make_allocator_with(6, 1.5);
-        let block = alloc.alloc(10).unwrap();
-        // ceil(1.5 * 10) = 15, disk = 15 + 13 = 28
-        let raw_len = unsafe { block.into_slice().len() };
-        assert_eq!(raw_len, 15 + LZMA2_OVERHEAD);
-        assert_eq!(block.raw_capacity(), 15);
-    }
-
-    #[test]
-    fn test_fractional_capacity_factor_rounds_up_fractional_n() {
-        let (alloc, _f) = make_allocator_with(6, 1.5);
-        let block = alloc.alloc(7).unwrap();
-        // ceil(1.5 * 7) = ceil(10.5) = 11
-        assert_eq!(block.raw_capacity(), 11);
+        assert_eq!(raw_len, 64 + LZMA2_OVERHEAD);
+        assert_eq!(block.capacity(), 64);
     }
 
     #[test]
@@ -848,11 +789,12 @@ mod tests {
         assert_eq!(block.read().unwrap(), data);
     }
 
-    // The writer does NOT truncate; compressible data beyond raw_capacity can be stored.
+    // The writer does NOT truncate; compressible data larger than n can be stored
+    // as long as it compresses to fit within n.
     #[test]
-    fn test_writer_stores_compressible_data_larger_than_raw_capacity() {
+    fn test_writer_stores_compressible_data_larger_than_n() {
         let (alloc, _f) = make_allocator();
-        let block = alloc.alloc(64).unwrap(); // raw_capacity = 128
+        let block = alloc.alloc(64).unwrap(); // n = 64
         let data = vec![b'x'; 1024]; // 1024 b'x' compresses to ~20 bytes — fits easily
         {
             let mut w = block.writer().unwrap();
@@ -863,14 +805,13 @@ mod tests {
         assert_eq!(block.read().unwrap(), data);
     }
 
-    // The writer path (unlike the trait write()) does not truncate, so data larger
-    // than n but ≤ raw_capacity is stored via the raw fallback.
+    // Incompressible data exactly at capacity falls back to raw storage, since
+    // LZMA2's framing overhead makes the compressed form larger than n.
     #[test]
-    fn test_writer_raw_fallback_for_data_between_n_and_raw_capacity() {
-        let (alloc, _f) = make_allocator(); // n=64, raw_capacity=128
+    fn test_writer_raw_fallback_for_incompressible_data_at_capacity() {
+        let (alloc, _f) = make_allocator(); // n = 64
         let block = alloc.alloc(64).unwrap();
-        // 100 pseudo-random bytes: > n (64) but ≤ raw_capacity (128).
-        let data: Vec<u8> = (0..100u8)
+        let data: Vec<u8> = (0..64u8)
             .map(|i| i.wrapping_mul(37).wrapping_add(13))
             .collect();
         {
@@ -885,8 +826,8 @@ mod tests {
     // BStackGuardedSlice::write() truncates to n bytes; data beyond that is dropped.
     #[test]
     fn test_guarded_write_silently_truncates_to_n() {
-        let (alloc, _f) = make_allocator_with(6, 1.5);
-        let block = alloc.alloc(16).unwrap(); // n=16, raw_capacity=ceil(24)=24
+        let (alloc, _f) = make_allocator();
+        let block = alloc.alloc(16).unwrap(); // n=16
         // write 200 bytes — only first n=16 survive.
         let data: Vec<u8> = (0..200u8).collect();
         block.write(&data).unwrap(); // must not error
@@ -898,7 +839,7 @@ mod tests {
     // The writer (unlike the trait write()) fails when data cannot fit after compression.
     #[test]
     fn test_writer_fails_when_too_large_for_both_paths() {
-        let (alloc, _f) = make_allocator_with(6, 1.0);
+        let (alloc, _f) = make_allocator();
         let block = alloc.alloc(16).unwrap();
         // 200 random bytes; neither compresses to ≤16 nor fits raw ≤16.
         let data: Vec<u8> = (0..200u8)
@@ -955,7 +896,7 @@ mod tests {
         block.write(b"persistent payload").unwrap();
         let bytes: [u8; 16] = block.into();
         let block2 = BLZMA2Block::from_bytes(&alloc, bytes);
-        assert_eq!(block2.compressed_budget(), 64);
+        assert_eq!(block2.capacity(), 64);
         assert!(block2.verify().unwrap());
         assert_eq!(block2.read().unwrap(), b"persistent payload");
     }
@@ -1028,7 +969,7 @@ mod tests {
         let block = alloc.alloc(64).unwrap();
         block.write(b"unchanged").unwrap();
         let block2 = alloc.realloc(block, 64).unwrap();
-        assert_eq!(block2.compressed_budget(), 64);
+        assert_eq!(block2.capacity(), 64);
         assert_eq!(block2.read().unwrap(), b"unchanged");
     }
 
@@ -1038,7 +979,7 @@ mod tests {
         let block = alloc.alloc(64).unwrap();
         block.write(b"grow me").unwrap();
         let block2 = alloc.realloc(block, 128).unwrap();
-        assert_eq!(block2.compressed_budget(), 128);
+        assert_eq!(block2.capacity(), 128);
         assert_eq!(block2.read().unwrap(), b"grow me");
     }
 
@@ -1048,7 +989,7 @@ mod tests {
         let block = alloc.alloc(128).unwrap();
         block.write(b"shrink me").unwrap();
         let block2 = alloc.realloc(block, 32).unwrap();
-        assert_eq!(block2.compressed_budget(), 32);
+        assert_eq!(block2.capacity(), 32);
         assert_eq!(block2.read().unwrap(), b"shrink me");
     }
 
@@ -1062,9 +1003,9 @@ mod tests {
 
     #[test]
     fn test_len_returns_n() {
-        let (alloc, _f) = make_allocator_with(6, 3.0);
+        let (alloc, _f) = make_allocator();
         let block = alloc.alloc(50).unwrap();
-        // len() = n = 50, regardless of raw_capacity (150) or overhead.
+        // len() = n = 50, the disk payload capacity, regardless of overhead.
         assert_eq!(<BLZMA2Block<_> as BStackGuardedSlice<_>>::len(&block), 50);
     }
 }

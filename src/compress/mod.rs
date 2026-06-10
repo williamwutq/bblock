@@ -5,10 +5,10 @@
 //!
 //! Unlike checksum or crypt wrappers, the on-disk size of a compressed payload
 //! is data-dependent. To keep the allocation model fixed-size (so block handles
-//! remain `Copy` and offsets are stable), each allocator reserves
-//! `capacity_factor * n + overhead` bytes on disk for `alloc(n)`. The block
-//! header records whether the stored payload is compressed or stored raw, so
-//! incompressible data falls back to raw storage within the reservation.
+//! remain `Copy` and offsets are stable), each allocator reserves `n + overhead`
+//! bytes on disk for `alloc(n)`. The block header records whether the stored
+//! payload is compressed or stored raw, so incompressible data falls back to
+//! raw storage within the same `n`-byte reservation.
 //!
 //! All block types are re-exported at this level for convenience:
 //!
